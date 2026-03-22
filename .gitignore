@@ -1,0 +1,11 @@
+.env
+config.json
+output/
+temp/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.DS_Store
