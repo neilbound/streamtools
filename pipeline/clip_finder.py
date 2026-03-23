@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def find_clips(transcript: dict, video_duration: float) -> list[dict]:
+def find_clips(transcript: dict, video_duration: float, producer_context: str = "") -> list[dict]:
     """
     Ask Claude to identify the best clip segments from a transcript.
 
@@ -42,9 +42,11 @@ def find_clips(transcript: dict, video_duration: float) -> list[dict]:
     duration_min = int(video_duration // 60)
     duration_sec = int(video_duration % 60)
 
-    prompt = f"""You are a video editor helping identify the best short clips from a longer video.
+    system = producer_context.strip() if producer_context.strip() else (
+        "You are a video editor helping identify the best short clips from a longer video."
+    )
 
-The video is {duration_min}m {duration_sec}s long. Below is the full transcript with approximate timing.
+    prompt = f"""The video is {duration_min}m {duration_sec}s long. Below is the full transcript.
 
 Your task: identify 3 to 5 self-contained segments that would work well as YouTube Shorts or social media clips (45–90 seconds each). Look for:
 - Strong, punchy openings (no mid-sentence starts)
@@ -55,19 +57,21 @@ Your task: identify 3 to 5 self-contained segments that would work well as YouTu
 Transcript:
 {transcript["text"]}
 
-Return ONLY a JSON array with this exact structure (no markdown, no explanation):
+Return ONLY a JSON array (no markdown, no explanation):
 [
   {{
     "title": "Short descriptive title",
     "start_time": 12.5,
     "end_time": 67.0,
-    "reason": "Why this segment works as a clip"
+    "reason": "Why this segment works as a clip",
+    "description": "2-3 line social caption burned into the video (use \\n for line breaks)"
   }}
 ]"""
 
     message = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1024,
+        system=system,
         messages=[{"role": "user", "content": prompt}],
     )
 

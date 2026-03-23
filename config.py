@@ -10,6 +10,7 @@ DEFAULT_STYLE = {
     "highlight_color": "&H0000FFFF",  # yellow
     "bold": True,
     "margin_v": 40,                   # vertical margin from bottom edge (pixels)
+    "producer_context": "",           # show/producer context used as Claude system prompt
 }
 
 

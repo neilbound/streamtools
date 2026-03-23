@@ -1,8 +1,8 @@
 # Transcription — GPU-accelerated Whisper with word-level timestamps
 faster-whisper>=1.0.0
 
-# Audio cleanup — neural noise/reverb suppression
-deepfilternet>=0.5.6
+# Audio cleanup — AI speech denoising (Facebook Denoiser, pure PyTorch, no compilation)
+denoiser>=0.1.5
 
 # Claude API — clip selection
 anthropic>=0.40.0
@@ -13,5 +13,11 @@ ffmpeg-python>=0.2.0
 # Streamlit — local browser UI
 streamlit>=1.40.0
 
+# Audio I/O backend for torchaudio on Windows
+soundfile>=0.12.0
+
 # Environment variable loading
 python-dotenv>=1.0.0
+
+# Profanity filtering — pure Python word list, no C extensions, compatible with Python 3.12
+better-profanity>=0.7.0

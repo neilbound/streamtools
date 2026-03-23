@@ -103,6 +103,58 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return output_path
 
 
+def _seconds_to_srt_time(seconds: float) -> str:
+    """Convert float seconds to SRT time format HH:MM:SS,mmm"""
+    total_ms = int(round(seconds * 1000))
+    h = total_ms // 3600000
+    total_ms %= 3600000
+    m = total_ms // 60000
+    total_ms %= 60000
+    s = total_ms // 1000
+    ms = total_ms % 1000
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def build_srt(
+    words: list[dict],
+    output_path: str,
+    start_offset: float = 0.0,
+) -> str:
+    """
+    Build an SRT subtitle file from word timestamps.
+    Uses the same line grouping as the karaoke ASS builder.
+
+    Args:
+        words:        list of {"word": str, "start": float, "end": float}
+        output_path:  where to write the .srt file
+        start_offset: subtract this from all timestamps (clip start time)
+
+    Returns:
+        output_path
+    """
+    lines = _group_words_into_lines(words, max_words=8, pause_threshold=0.5)
+
+    entries = []
+    index = 1
+    for line_words in lines:
+        if not line_words:
+            continue
+        line_start = line_words[0]["start"] - start_offset
+        line_end = line_words[-1]["end"] - start_offset
+        if line_start < 0:
+            continue
+        text = " ".join(w["word"].strip() for w in line_words)
+        entries.append(
+            f"{index}\n{_seconds_to_srt_time(line_start)} --> {_seconds_to_srt_time(line_end)}\n{text}"
+        )
+        index += 1
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(entries) + "\n")
+
+    return output_path
+
+
 def _group_words_into_lines(
     words: list[dict],
     max_words: int = 8,
