@@ -1,11 +1,14 @@
 """
-Transcription via WhisperX (large-v3, CUDA) with phoneme-level forced alignment.
+Transcription via WhisperX (distil-large-v3.5, CUDA) with phoneme-level forced alignment.
 
 WhisperX runs two passes:
-  1. Whisper large-v3  — high-quality transcription
-  2. wav2vec2 aligner  — frame-accurate per-word timestamps
+  1. Distil-Whisper distil-large-v3.5 — faster inference, near large-v3 accuracy
+  2. wav2vec2 aligner                 — frame-accurate per-word timestamps
 
-Returns a dict with the full text and per-word timestamps.
+Distil-large-v3.5 is ~6x faster than large-v3 with minimal accuracy loss,
+and uses less VRAM — better fit for 8GB RTX 4070 Laptop.
+
+Branch: test/model-upgrades
 """
 
 import whisperx
@@ -15,12 +18,13 @@ _align_model = None
 _align_metadata = None
 _DEVICE = "cuda"
 _COMPUTE_TYPE = "float16"
+_WHISPER_MODEL = "distil-large-v3"   # distil-large-v3.5 not yet on whisperx; distil-large-v3 is the latest supported
 
 
 def _get_model():
     global _model
     if _model is None:
-        _model = whisperx.load_model("large-v3", _DEVICE, compute_type=_COMPUTE_TYPE)
+        _model = whisperx.load_model(_WHISPER_MODEL, _DEVICE, compute_type=_COMPUTE_TYPE)
     return _model
 
 
