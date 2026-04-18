@@ -1,7 +1,8 @@
 """
 Clip selection via Claude API.
-Sends the full transcript to Claude and asks it to identify
+Sends a timestamped transcript to Claude and asks it to identify
 the 3-5 most engaging self-contained segments suitable for Shorts.
+Timestamps are snapped to real word boundaries after Claude responds.
 """
 
 import json
@@ -13,6 +14,48 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _build_timestamped_transcript(words: list[dict]) -> str:
+    """
+    Build a transcript string with timestamp markers every ~15 words.
+    e.g.  [00:00] And I think the most important thing here is that...
+          [00:14] ...you have to be willing to take that first step.
+    """
+    if not words:
+        return ""
+
+    lines = []
+    chunk = []
+    chunk_start = words[0]["start"]
+
+    for w in words:
+        chunk.append(w["word"].strip())
+        if len(chunk) >= 15:
+            m = int(chunk_start // 60)
+            s = int(chunk_start % 60)
+            lines.append(f"[{m:02d}:{s:02d}] {' '.join(chunk)}")
+            chunk = []
+            chunk_start = w["end"]
+
+    if chunk:
+        m = int(chunk_start // 60)
+        s = int(chunk_start % 60)
+        lines.append(f"[{m:02d}:{s:02d}] {' '.join(chunk)}")
+
+    return "\n".join(lines)
+
+
+def _snap_start(words: list[dict], t: float, tolerance: float = 3.0) -> float:
+    """Snap t to the start of the first word at or after t (within tolerance lookback)."""
+    candidates = [w for w in words if w["start"] >= t - tolerance]
+    return candidates[0]["start"] if candidates else t
+
+
+def _snap_end(words: list[dict], t: float, tolerance: float = 3.0, pause: float = 0.4) -> float:
+    """Snap t to just after the last word ending at or before t (within tolerance lookahead)."""
+    candidates = [w for w in words if w["end"] <= t + tolerance]
+    return (candidates[-1]["end"] + pause) if candidates else t
+
+
 def find_clips(transcript: dict, video_duration: float, producer_context: str = "") -> list[dict]:
     """
     Ask Claude to identify the best clip segments from a transcript.
@@ -22,16 +65,7 @@ def find_clips(transcript: dict, video_duration: float, producer_context: str = 
         video_duration: total video length in seconds
 
     Returns:
-        List of clips:
-        [
-            {
-                "title": str,       # short descriptive title
-                "start_time": float,  # seconds
-                "end_time": float,
-                "reason": str,      # why this segment is worth clipping
-            },
-            ...
-        ]
+        List of clips with start/end snapped to real word boundaries.
     """
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
@@ -39,6 +73,8 @@ def find_clips(transcript: dict, video_duration: float, producer_context: str = 
 
     client = anthropic.Anthropic(api_key=api_key)
 
+    words = transcript.get("words", [])
+    timestamped = _build_timestamped_transcript(words)
     duration_min = int(video_duration // 60)
     duration_sec = int(video_duration % 60)
 
@@ -46,25 +82,27 @@ def find_clips(transcript: dict, video_duration: float, producer_context: str = 
         "You are a video editor helping identify the best short clips from a longer video."
     )
 
-    prompt = f"""The video is {duration_min}m {duration_sec}s long. Below is the full transcript.
+    prompt = f"""The video is {duration_min}m {duration_sec}s long. Below is the transcript with timestamps in [MM:SS] format every ~15 words. Use these timestamps as anchors when setting start_time and end_time — pick values that correspond to real timestamp markers so clips begin and end at natural sentence boundaries.
 
 Your task: identify 3 to 5 self-contained segments that would work well as YouTube Shorts or social media clips (45–90 seconds each). Look for:
-- Strong, punchy openings (no mid-sentence starts)
+- Strong, punchy openings (no mid-sentence starts — begin right at a [MM:SS] marker or just after)
 - A clear single idea, insight, or story
-- Natural ending points (not cut off mid-thought)
+- Natural ending points (end after a complete sentence, not mid-thought)
 - High energy or quotable moments
+- Clips must NOT overlap — each clip's start_time must be after the previous clip's end_time
+- Sort clips in chronological order by start_time
 
 Transcript:
-{transcript["text"]}
+{timestamped}
 
-Return ONLY a JSON array (no markdown, no explanation):
+Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds as floats:
 [
   {{
     "title": "Short descriptive title",
-    "start_time": 12.5,
+    "start_time": 12.0,
     "end_time": 67.0,
     "reason": "Why this segment works as a clip",
-    "description": "2-3 line social caption burned into the video (use \\n for line breaks)"
+    "description": "Cast Name | Show S#"
   }}
 ]"""
 
@@ -77,7 +115,6 @@ Return ONLY a JSON array (no markdown, no explanation):
 
     raw = message.content[0].text.strip()
 
-    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -86,9 +123,30 @@ Return ONLY a JSON array (no markdown, no explanation):
 
     clips = json.loads(raw)
 
-    # Clamp timestamps to video bounds
-    for clip in clips:
-        clip["start_time"] = max(0.0, float(clip["start_time"]))
-        clip["end_time"] = min(video_duration, float(clip["end_time"]))
+    # Sort chronologically before de-overlapping
+    clips.sort(key=lambda c: float(c["start_time"]))
 
-    return clips
+    prev_end = 0.0
+    keep = []
+    for clip in clips:
+        raw_start = max(prev_end, float(clip["start_time"]))
+        raw_end = min(video_duration, float(clip["end_time"]))
+
+        # Snap to real word boundaries so clips don't cut mid-sentence
+        snapped_start = _snap_start(words, raw_start)
+        snapped_end = _snap_end(words, raw_end)
+
+        # Clamp
+        snapped_start = max(prev_end, snapped_start)
+        snapped_end = min(video_duration, snapped_end)
+
+        # Drop clip if it collapsed to nothing after de-overlap
+        if snapped_end <= snapped_start:
+            continue
+
+        clip["start_time"] = snapped_start
+        clip["end_time"] = snapped_end
+        prev_end = snapped_end
+        keep.append(clip)
+
+    return keep

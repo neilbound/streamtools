@@ -47,6 +47,7 @@ def build_karaoke_ass(
     font_size = style.get("font_size", 18)
     primary = style.get("primary_color", "&H00FFFFFF")
     highlight = style.get("highlight_color", "&H0000FFFF")
+    bg_color = style.get("bg_color", "&H80000000")
     bold = -1 if style.get("bold", True) else 0
     margin_v = style.get("margin_v", 40)
 
@@ -59,14 +60,14 @@ WrapStyle: 1
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,{font_name},{font_size},{primary},{highlight},&H00000000,&H80000000,{bold},0,0,0,100,100,0,0,1,2,1,2,20,20,{margin_v},1
+Style: Karaoke,{font_name},{font_size},{highlight},{primary},&H00000000,&H00000000,{bold},0,0,0,100,100,2,0,1,6,2,2,20,20,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
 
     # Group words into lines of ~8 words (or by natural pause > 0.5s)
-    lines = _group_words_into_lines(words, max_words=8, pause_threshold=0.5)
+    lines = _group_words_into_lines(words, max_words=4, pause_threshold=0.3)
 
     events = []
     for line_words in lines:
@@ -79,12 +80,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if line_start < 0:
             continue
 
-        # Build karaoke text: {\\kf<cs>}word for each word
+        # Build karaoke text: {\\k<cs>}word for each word
+        # Each word's duration spans to the next word's start so highlights
+        # stay in sync even when there are gaps between words.
         karaoke_parts = []
-        for w in line_words:
-            duration_cs = max(1, int(round((w["end"] - w["start"]) * 100)))
-            word_text = w["word"].strip()
-            karaoke_parts.append(f"{{\\kf{duration_cs}}}{word_text}")
+        for i, w in enumerate(line_words):
+            if i < len(line_words) - 1:
+                duration_cs = max(1, int(round((line_words[i + 1]["start"] - w["start"]) * 100)))
+            else:
+                duration_cs = max(1, int(round((w["end"] - w["start"]) * 100)))
+            word_text = w["word"].strip().upper()
+            karaoke_parts.append(f"{{\\k{duration_cs}}}{word_text}")
 
         text = " ".join(karaoke_parts)
 
@@ -132,7 +138,7 @@ def build_srt(
     Returns:
         output_path
     """
-    lines = _group_words_into_lines(words, max_words=8, pause_threshold=0.5)
+    lines = _group_words_into_lines(words, max_words=4, pause_threshold=0.3)
 
     entries = []
     index = 1
@@ -157,8 +163,8 @@ def build_srt(
 
 def _group_words_into_lines(
     words: list[dict],
-    max_words: int = 8,
-    pause_threshold: float = 0.5,
+    max_words: int = 4,
+    pause_threshold: float = 0.3,
 ) -> list[list[dict]]:
     """
     Split words into subtitle lines.

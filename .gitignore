@@ -2,6 +2,7 @@
 config.json
 output/
 temp/
+cache/
 __pycache__/
 *.pyc
 *.pyo

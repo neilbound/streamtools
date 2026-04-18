@@ -1,12 +1,15 @@
 """
 streamtools — Video Content Pipeline
-Streamlit UI: Upload → Process → Review Clips → Export
+Streamlit UI: Upload → Process → Review & Export
 """
 
+import io
+import json
 import os
 import shutil
-import tempfile
+import zipfile
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -22,34 +25,119 @@ load_dotenv()
 
 TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+CACHE_DIR = os.path.join(os.path.dirname(__file__), "cache")
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def _cache_meta_path(basename: str) -> str:
+    return os.path.join(CACHE_DIR, f"{basename}.json")
+
+
+def _cache_audio_path(basename: str) -> str:
+    return os.path.join(CACHE_DIR, f"{basename}_clean.wav")
+
+
+def _load_cache(basename: str) -> dict | None:
+    meta = _cache_meta_path(basename)
+    audio = _cache_audio_path(basename)
+    if os.path.exists(meta) and os.path.exists(audio):
+        with open(meta, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def _save_cache(basename: str, transcript: dict, video_duration: float) -> None:
+    with open(_cache_meta_path(basename), "w", encoding="utf-8") as f:
+        json.dump({"transcript": transcript, "video_duration": video_duration}, f)
+
+_CLIP_COLS = ["approved", "title", "start_time", "end_time", "description", "reason"]
 
 st.set_page_config(page_title="streamtools", layout="wide")
 st.title("streamtools")
-st.caption("Upload → Transcribe → Find Clips → Export with karaoke captions")
+st.caption("Upload → Process → Review & Export with karaoke captions")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sidebar — Producer context
+# Sidebar — Show profiles + Caption style
 # ─────────────────────────────────────────────────────────────────────────────
 _cfg = config.load()
 with st.sidebar:
-    st.header("Show Context")
-    st.caption("Paste your show/producer context here. Claude uses this when suggesting clips and writing descriptions.")
+    st.header("Show Profiles")
+
+    profile_names = list(_cfg["profiles"].keys())
+    active = _cfg.get("active_profile", profile_names[0])
+    if active not in profile_names:
+        active = profile_names[0]
+
+    selected = st.selectbox("Active show", profile_names, index=profile_names.index(active))
+    _cfg["active_profile"] = selected
+
+    st.caption("Claude uses this when suggesting clips and generating chyrons.")
     producer_context = st.text_area(
-        "Producer context",
-        value=_cfg.get("producer_context", ""),
-        height=220,
-        label_visibility="collapsed",
-        placeholder="e.g. You are a producer for Love is Blind Season 10. The cast includes Nick, Chelsea, AD, Clay... Focus on dramatic moments, relationship revelations, and fan-favourite interactions.",
+        "Show context",
+        value=_cfg["profiles"][selected].get("producer_context", ""),
+        height=150,
+        placeholder="e.g. You are a producer for Love is Blind Season 11. Focus on dramatic moments and relationship reveals. Chyron format: [Names] | Love is Blind S11",
     )
-    if st.button("Save Context"):
-        _cfg["producer_context"] = producer_context
-        config.save(_cfg)
-        st.success("Saved.")
+
+    col_save, col_del = st.columns(2)
+    with col_save:
+        if st.button("Save", use_container_width=True):
+            _cfg["profiles"][selected]["producer_context"] = producer_context
+            config.save(_cfg)
+            st.success("Saved.")
+    with col_del:
+        if st.button("Delete", use_container_width=True, type="secondary"):
+            if len(_cfg["profiles"]) > 1:
+                del _cfg["profiles"][selected]
+                _cfg["active_profile"] = list(_cfg["profiles"].keys())[0]
+                config.save(_cfg)
+                st.rerun()
+            else:
+                st.warning("Can't delete the last profile.")
+
+    st.divider()
+    new_name = st.text_input("New show name", placeholder="e.g. The Bachelor S29")
+    if st.button("Add Profile", use_container_width=True):
+        name = new_name.strip()
+        if name and name not in _cfg["profiles"]:
+            _cfg["profiles"][name] = {"producer_context": "", **config.DEFAULT_STYLE}
+            _cfg["active_profile"] = name
+            config.save(_cfg)
+            st.rerun()
+        elif name in _cfg["profiles"]:
+            st.warning("A profile with that name already exists.")
+
+    st.divider()
+    # ── Caption style (persistent, per show) ────────────────────────────────
+    style = config.active_style(_cfg)
+    with st.expander("Caption Style"):
+        col1, col2 = st.columns(2)
+        with col1:
+            style["font_name"] = st.text_input("Font", value=style["font_name"])
+            style["font_size"] = st.number_input("Size", min_value=8, max_value=200, value=int(style["font_size"]))
+            style["bold"] = st.checkbox("Bold", value=bool(style["bold"]))
+        with col2:
+            style["primary_color"] = st.text_input(
+                "Text color (ASS)", value=style["primary_color"],
+                help="&HAABBGGRR — white = &H00FFFFFF",
+            )
+            style["highlight_color"] = st.text_input(
+                "Highlight color", value=style["highlight_color"],
+                help="Warm yellow = &H0000C8FF",
+            )
+            style["margin_v"] = st.number_input(
+                "Vertical position (px)", min_value=0, max_value=1900, value=int(style["margin_v"]),
+                help="960 = center of 1920px frame",
+            )
+        if st.button("Save Style", use_container_width=True):
+            _cfg["profiles"][selected].update(style)
+            config.save(_cfg)
+            st.success("Style saved.")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Session state initialisation
+# Session state
 # ─────────────────────────────────────────────────────────────────────────────
 defaults = {
     "video_path": None,
@@ -59,11 +147,10 @@ defaults = {
     "filter_enabled": False,
     "transcript": None,
     "video_duration": None,
-    "clips": [],
-    "approved": {},        # clip index → bool
-    "start_times": {},
-    "end_times": {},
-    "descriptions": {},    # clip index → editable description string
+    "episode_context": "",   # per-upload context; resets on new file
+    "clips": [],             # list of dicts: approved, title, start_time, end_time, description, reason
+    "output_files": [],      # list of (title, path, mime) after export
+    "cache_loaded": False,   # True when transcript/audio were loaded from cache
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -81,83 +168,126 @@ uploaded = st.file_uploader(
 
 if uploaded:
     dest = os.path.join(TEMP_DIR, uploaded.name)
+    base_name = os.path.splitext(uploaded.name)[0]
     if st.session_state.video_path != dest:
         with open(dest, "wb") as f:
             shutil.copyfileobj(uploaded, f)
         st.session_state.video_path = dest
-        # Reset downstream state when a new file is uploaded
-        st.session_state.transcript = None
-        st.session_state.clean_audio_path = None
         st.session_state.filtered_audio_path = None
         st.session_state.censored_words = []
         st.session_state.clips = []
-        st.session_state.approved = {}
-        st.session_state.start_times = {}
-        st.session_state.end_times = {}
-        st.session_state.descriptions = {}
+        st.session_state.output_files = []
+        st.session_state.episode_context = ""
 
-    st.success(f"Loaded: **{uploaded.name}**")
+        cached = _load_cache(base_name)
+        if cached:
+            st.session_state.transcript = cached["transcript"]
+            st.session_state.video_duration = cached["video_duration"]
+            st.session_state.clean_audio_path = _cache_audio_path(base_name)
+            duration = float(cached["video_duration"] or 0)
+            st.session_state.clips = [{
+                "approved": True,
+                "title": base_name,
+                "start_time": 0.0,
+                "end_time": duration,
+                "description": "",
+                "reason": "_fullvideo",
+            }]
+            st.session_state.cache_loaded = True
+        else:
+            st.session_state.transcript = None
+            st.session_state.clean_audio_path = None
+            st.session_state.video_duration = None
+            st.session_state.cache_loaded = False
+
+    if st.session_state.cache_loaded:
+        dur = st.session_state.video_duration or 0
+        st.success(f"Loaded from cache: **{uploaded.name}** — {int(dur // 60)}m {int(dur % 60)}s · ready to export")
+    else:
+        st.success(f"Loaded: **{uploaded.name}**")
+
+    st.session_state.episode_context = st.text_area(
+        "Episode context (optional)",
+        value=st.session_state.episode_context,
+        height=80,
+        placeholder="Who's being discussed? Any episode notes? e.g. 'This clip is about Jordan and Alexis during the wedding episode.'",
+        help="Used by Claude when suggesting clips and can inform chyron descriptions. Resets when you upload a new file.",
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 2 — Transcribe + Clean Audio
+# Step 2 — Process
 # ─────────────────────────────────────────────────────────────────────────────
 st.divider()
-st.header("2 · Transcribe & Clean Audio")
+st.header("2 · Process")
 
 if not st.session_state.video_path:
     st.info("Upload a video above to continue.")
 else:
+    if st.session_state.cache_loaded:
+        st.info("Transcript and clean audio loaded from cache. Jump straight to Step 3, or re-process below.")
+
     filter_enabled = st.checkbox(
         "Filter profanity (bleep offensive words)",
         value=st.session_state.filter_enabled,
         key="filter_enabled",
     )
 
-    if st.button("Process Video", type="primary"):
+    btn_label = "Re-process Video" if st.session_state.cache_loaded else "Process Video"
+    if st.button(btn_label, type="primary"):
         video_path = st.session_state.video_path
         base_name = os.path.splitext(os.path.basename(video_path))[0]
-        clean_path = os.path.join(TEMP_DIR, f"{base_name}_clean.wav")
-
+        clean_path = _cache_audio_path(base_name)   # save directly to cache
         progress = st.progress(0, text="Starting…")
 
-        with st.spinner("Transcribing with Whisper large-v3…"):
-            progress.progress(10, text="Transcribing audio…")
-            transcript = transcribe(video_path)
-            st.session_state.transcript = transcript
-            st.session_state.video_duration = get_video_duration(video_path)
-            progress.progress(60, text="Transcription complete. Cleaning audio…")
-
-        with st.spinner("Cleaning audio with Denoiser…"):
+        with st.spinner("Cleaning audio with DeepFilterNet3…"):
+            progress.progress(10, text="Cleaning audio…")
             clean_audio(video_path, clean_path)
             st.session_state.clean_audio_path = clean_path
-            progress.progress(90, text="Audio cleaned. Filtering…" if filter_enabled else "Done!")
+            st.session_state.video_duration = get_video_duration(video_path)
+            progress.progress(40, text="Audio cleaned. Transcribing…")
+
+        with st.spinner("Transcribing with Whisper large-v3…"):
+            transcript = transcribe(clean_path)
+            st.session_state.transcript = transcript
+            progress.progress(90, text="Transcription complete. Filtering…" if filter_enabled else "Saving cache…")
 
         if filter_enabled:
             with st.spinner("Filtering profanity…"):
                 filtered_path = os.path.join(TEMP_DIR, f"{base_name}_filtered.wav")
-                # Censor transcript text + caption words first
                 censored_transcript, censored = censor_transcript(transcript)
                 st.session_state.transcript = censored_transcript
-                # Bleep audio using original word timestamps
                 filter_profanity(clean_path, transcript["words"], filtered_path)
                 st.session_state.filtered_audio_path = filtered_path
                 st.session_state.censored_words = censored
-            progress.progress(100, text="Done!")
             if censored:
                 st.info(f"Censored {len(censored)} word(s): {', '.join(set(censored))}")
         else:
             st.session_state.filtered_audio_path = None
             st.session_state.censored_words = []
-            progress.progress(100, text="Done!")
 
-        st.success("Transcription and audio cleanup complete.")
+        # Save transcript + duration to cache (audio already written to cache dir)
+        _save_cache(base_name, st.session_state.transcript, st.session_state.video_duration)
+        st.session_state.cache_loaded = True
+
+        # Auto-populate a full-video row so the table is ready immediately
+        duration = float(st.session_state.video_duration or 0)
+        st.session_state.clips = [{
+            "approved": True,
+            "title": base_name,
+            "start_time": 0.0,
+            "end_time": duration,
+            "description": "",
+            "reason": "_fullvideo",
+        }]
+        st.session_state.output_files = []
+        progress.progress(100, text="Done!")
+        st.success("Processing complete — results cached.")
 
     if st.session_state.transcript:
-        st.subheader("Transcript Preview")
         st.text_area(
-            label="Full transcript",
+            label="Transcript",
             value=st.session_state.transcript["text"],
-            height=200,
+            height=160,
             label_visibility="collapsed",
         )
         word_count = len(st.session_state.transcript["words"])
@@ -165,192 +295,103 @@ else:
         st.caption(f"{word_count:,} words · {int(dur // 60)}m {int(dur % 60)}s")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3 — Find Clips
+# Step 3 — Review & Export
 # ─────────────────────────────────────────────────────────────────────────────
 st.divider()
-st.header("3 · Find Clips (Optional)")
-st.caption("Let Claude suggest clips automatically, or skip to Step 4 to define them manually.")
+st.header("3 · Review & Export")
 
 if not st.session_state.transcript:
     st.info("Complete Step 2 first.")
 else:
-    if st.button("Find Clips with Claude", type="primary"):
-        with st.spinner("Asking Claude to find the best clips…"):
-            clips = find_clips(
-                st.session_state.transcript,
-                st.session_state.video_duration,
-                producer_context=config.load().get("producer_context", ""),
-            )
-            st.session_state.clips = clips
-            st.session_state.approved = {i: True for i in range(len(clips))}
-            st.session_state.start_times = {i: c["start_time"] for i, c in enumerate(clips)}
-            st.session_state.end_times = {i: c["end_time"] for i, c in enumerate(clips)}
-            st.session_state.descriptions = {i: c.get("description", "") for i, c in enumerate(clips)}
+    # ── Optional: AI clip suggestions ──────────────────────────────────────
+    with st.expander("AI Clip Suggestions (optional)"):
+        st.caption("Claude analyses the transcript and suggests the best clips with descriptions.")
+        if st.button("Suggest Clips with Claude", type="primary"):
+            with st.spinner("Asking Claude…"):
+                show_context = config.active_context(config.load())
+                episode_ctx = st.session_state.episode_context.strip()
+                full_context = show_context
+                if episode_ctx:
+                    full_context = f"{show_context}\n\nEpisode context: {episode_ctx}".strip()
+                suggestions = find_clips(
+                    st.session_state.transcript,
+                    st.session_state.video_duration,
+                    producer_context=full_context,
+                )
+                st.session_state.clips = [
+                    {
+                        "approved": True,
+                        "title": c["title"],
+                        "start_time": float(c["start_time"]),
+                        "end_time": float(c["end_time"]),
+                        "description": c.get("description", ""),
+                        "reason": c.get("reason", ""),
+                    }
+                    for c in suggestions
+                ]
+            st.success(f"{len(suggestions)} clip(s) suggested — review the table below.")
+
+    # ── Editable review table ───────────────────────────────────────────────
+    st.subheader("Clips")
+    st.caption("Edit titles, timestamps, and descriptions inline. ✓ = include in export. Use the bottom row to add new clips.")
+
+    max_dur = float(st.session_state.video_duration or 9999)
 
     if st.session_state.clips:
-        st.subheader("Suggested Clips")
-        st.caption("Check the clips you want to export. Adjust timestamps if needed.")
-
-        for i, clip in enumerate(st.session_state.clips):
-            with st.container(border=True):
-                col_check, col_info = st.columns([0.05, 0.95])
-
-                with col_check:
-                    approved = st.checkbox(
-                        "include",
-                        value=st.session_state.approved.get(i, True),
-                        key=f"approve_{i}",
-                        label_visibility="collapsed",
-                    )
-                    st.session_state.approved[i] = approved
-
-                with col_info:
-                    st.markdown(f"**{clip['title']}**")
-                    st.caption(clip["reason"])
-
-                    t_col1, t_col2 = st.columns(2)
-                    with t_col1:
-                        start = st.number_input(
-                            "Start (s)",
-                            min_value=0.0,
-                            max_value=float(st.session_state.video_duration or 9999),
-                            value=float(st.session_state.start_times.get(i, clip["start_time"])),
-                            step=0.5,
-                            key=f"start_{i}",
-                        )
-                        st.session_state.start_times[i] = start
-
-                    with t_col2:
-                        end = st.number_input(
-                            "End (s)",
-                            min_value=0.0,
-                            max_value=float(st.session_state.video_duration or 9999),
-                            value=float(st.session_state.end_times.get(i, clip["end_time"])),
-                            step=0.5,
-                            key=f"end_{i}",
-                        )
-                        st.session_state.end_times[i] = end
-
-                    clip_duration = end - start
-                    st.caption(f"Duration: {clip_duration:.1f}s")
-
-                    desc = st.text_area(
-                        "Description (burned into video)",
-                        value=st.session_state.descriptions.get(i, ""),
-                        height=80,
-                        key=f"desc_{i}",
-                        help="Shown at the top of the video. Use \\n for a new line.",
-                    )
-                    st.session_state.descriptions[i] = desc
-
-                    # Show transcript excerpt for this segment
-                    excerpt_words = [
-                        w["word"] for w in st.session_state.transcript["words"]
-                        if start <= w["start"] <= end
-                    ]
-                    if excerpt_words:
-                        st.markdown(
-                            f"> *{' '.join(excerpt_words[:60])}{'…' if len(excerpt_words) > 60 else ''}*"
-                        )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 4 — Export
-# ─────────────────────────────────────────────────────────────────────────────
-st.divider()
-st.header("4 · Export")
-
-if not st.session_state.transcript:
-    st.info("Complete Step 2 first.")
-else:
-    # Manual clip adder
-    with st.expander("Add clip manually"):
-        m_title = st.text_input("Title", key="manual_title", placeholder="e.g. Key Insight")
-        m_col1, m_col2 = st.columns(2)
-        with m_col1:
-            m_start = st.number_input("Start (s)", min_value=0.0,
-                                      max_value=float(st.session_state.video_duration or 9999),
-                                      value=0.0, step=0.5, key="manual_start")
-        with m_col2:
-            m_end = st.number_input("End (s)", min_value=0.0,
-                                    max_value=float(st.session_state.video_duration or 9999),
-                                    value=float(st.session_state.video_duration or 60.0),
-                                    step=0.5, key="manual_end")
-        if st.button("Add Clip"):
-            if m_title and m_end > m_start:
-                new_clip = {"title": m_title, "start_time": m_start, "end_time": m_end, "reason": "Manual"}
-                st.session_state.clips.append(new_clip)
-                i = len(st.session_state.clips) - 1
-                st.session_state.approved[i] = True
-                st.session_state.start_times[i] = m_start
-                st.session_state.end_times[i] = m_end
-                st.rerun()
-            else:
-                st.warning("Enter a title and make sure End > Start.")
-
-    # Caption style settings
-    st.subheader("Caption Style")
-    style = config.load()
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        style["font_name"] = st.text_input("Font", value=style["font_name"])
-        style["font_size"] = st.number_input("Size", min_value=8, max_value=48, value=int(style["font_size"]))
-    with col2:
-        style["primary_color"] = st.text_input(
-            "Text color (ASS format)",
-            value=style["primary_color"],
-            help="ASS color: &HAABBGGRR. White = &H00FFFFFF",
-        )
-        style["highlight_color"] = st.text_input(
-            "Highlight color",
-            value=style["highlight_color"],
-            help="Yellow = &H0000FFFF",
-        )
-    with col3:
-        style["bold"] = st.checkbox("Bold", value=bool(style["bold"]))
-        style["margin_v"] = st.number_input(
-            "Bottom margin (px)",
-            min_value=0,
-            max_value=300,
-            value=int(style["margin_v"]),
-        )
-
-    if st.button("Save Style"):
-        config.save(style)
-        st.success("Style saved.")
-
-    st.divider()
-
-    approved_indices = [i for i, v in st.session_state.approved.items() if v]
-
-    if not approved_indices:
-        st.warning("No clips selected. Check at least one clip above.")
+        df = pd.DataFrame(st.session_state.clips)
+        for col in _CLIP_COLS:
+            if col not in df.columns:
+                df[col] = "" if col in ("title", "description", "reason") else (True if col == "approved" else 0.0)
     else:
-        st.write(f"**{len(approved_indices)} clip(s) selected for export.**")
+        df = pd.DataFrame(columns=_CLIP_COLS).astype({
+            "approved": bool, "title": str, "start_time": float,
+            "end_time": float, "description": str, "reason": str,
+        })
 
+    edited_df = st.data_editor(
+        df,
+        column_config={
+            "approved":    st.column_config.CheckboxColumn("✓", default=True, width="small"),
+            "title":       st.column_config.TextColumn("Title", width="medium"),
+            "start_time":  st.column_config.NumberColumn("Start (s)", min_value=0.0, max_value=max_dur, step=0.5, format="%.1f"),
+            "end_time":    st.column_config.NumberColumn("End (s)", min_value=0.0, max_value=max_dur, step=0.5, format="%.1f"),
+            "description": st.column_config.TextColumn("Video Subtitle", width="large", help="Format: Cast Name (& Cast Name) | Show Being Discussed S#"),
+            "reason":      None,
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+    )
+    st.session_state.clips = edited_df.to_dict("records")
+
+    # ── Export ──────────────────────────────────────────────────────────────
+    approved_clips = [c for c in st.session_state.clips if c.get("approved")]
+
+    if not approved_clips:
+        st.warning("No clips selected. Check ✓ on at least one row above.")
+    else:
+        st.write(f"**{len(approved_clips)} clip(s) ready to export.**")
         export_format = st.radio(
             "Export format",
-            ["Social (burned-in captions)", "YouTube (clean video + SRT)", "Both"],
+            ["Social (burned-in captions)", "YouTube (clean video + SRT)", "Both", "SRT Only"],
             horizontal=True,
         )
 
-        if st.button("Export Selected Clips", type="primary"):
+        if st.button("Export Approved Clips", type="primary"):
+            st.session_state.output_files = []
             export_bar = st.progress(0, text="Exporting…")
             output_files = []
-
             audio_for_export = (
                 st.session_state.filtered_audio_path or st.session_state.clean_audio_path
             )
 
-            for step, i in enumerate(approved_indices):
-                clip = st.session_state.clips[i]
-                start = st.session_state.start_times[i]
-                end = st.session_state.end_times[i]
-                description = st.session_state.descriptions.get(i, "")
-                safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in clip["title"])
-                safe_title = safe_title.strip().replace(" ", "_")
-
-                st.write(f"Exporting **{clip['title']}**…")
+            for step, clip in enumerate(approved_clips):
+                start = float(clip.get("start_time", 0))
+                end = float(clip.get("end_time", 0))
+                description = str(clip.get("description", "") or "")
+                safe_title = "".join(
+                    c if c.isalnum() or c in " -_" else "_"
+                    for c in str(clip.get("title", "clip"))
+                ).strip().replace(" ", "_") or f"clip_{step + 1}"
 
                 clip_words = [
                     w for w in st.session_state.transcript["words"]
@@ -386,18 +427,49 @@ else:
                     output_files.append((f"{clip['title']} (YouTube)", yt_path, "video/mp4"))
                     output_files.append((f"{clip['title']} (Captions .srt)", srt_path, "text/plain"))
 
+                if export_format == "SRT Only":
+                    srt_path = os.path.join(OUTPUT_DIR, f"{safe_title}.srt")
+                    build_srt(clip_words, srt_path, start_offset=start)
+                    output_files.append((f"{clip['title']} (Captions .srt)", srt_path, "text/plain"))
+
                 export_bar.progress(
-                    int((step + 1) / len(approved_indices) * 100),
-                    text=f"Exported {step + 1}/{len(approved_indices)}",
+                    int((step + 1) / len(approved_clips) * 100),
+                    text=f"Exported {step + 1}/{len(approved_clips)}",
                 )
 
+            st.session_state.output_files = output_files
             st.success("All clips exported!")
 
-            for title, path, mime in output_files:
-                with open(path, "rb") as f:
-                    st.download_button(
-                        label=f"Download: {title}",
-                        data=f,
-                        file_name=os.path.basename(path),
-                        mime=mime,
-                    )
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 4 — Download
+# ─────────────────────────────────────────────────────────────────────────────
+if st.session_state.output_files:
+    st.divider()
+    st.header("4 · Download")
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for _, path, _ in st.session_state.output_files:
+            if os.path.exists(path):
+                zf.write(path, os.path.basename(path))
+    zip_buf.seek(0)
+
+    st.download_button(
+        "Download All as ZIP",
+        data=zip_buf,
+        file_name="clips.zip",
+        mime="application/zip",
+        type="primary",
+    )
+
+    st.caption("Or download individually:")
+    for title, path, mime in st.session_state.output_files:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                st.download_button(
+                    label=f"Download: {title}",
+                    data=f,
+                    file_name=os.path.basename(path),
+                    mime=mime,
+                    key=path,
+                )

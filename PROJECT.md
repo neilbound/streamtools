@@ -9,14 +9,16 @@
 A local, GPU-accelerated video pipeline that takes raw Streamyard recordings and outputs
 ready-to-upload Shorts with cleaned audio and burned-in karaoke captions — automatically.
 
-**Why:** The current workflow spans Streamyard (transcription + AI clips) → CapCut (audio
-cleanup + captions), with manual handoffs at every step. Streamyard's transcription is
-inaccurate; CapCut's caption styling is manual every time. This tool replaces both with a
-single browser-based UI that runs on your own machine.
+**Why:** The current workflow spans Streamyard → CapCut, with manual handoffs at every step.
+Streamyard's transcription is inaccurate; CapCut's caption styling is manual every time.
+streamtools replaces both with a single browser-based UI that runs on your own machine.
+
+**Show context:** Built around a podcast covering reality TV (Love is Blind etc.), hosted in Ohio.
+Vertical video (1080×1920) exported natively from Streamyard via MARS (Multi-Aspect Ratio Streaming).
 
 **Non-goals (for now):**
 - Cloud hosting or multi-user access — runs locally only
-- Full video editing (trimming b-roll, graphics, music)
+- Full video editing (b-roll, graphics, music)
 - Automatic publishing to social platforms
 
 ---
@@ -26,60 +28,83 @@ single browser-based UI that runs on your own machine.
 | Area | Status | Notes |
 |---|---|---|
 | Project scaffolding | ✅ Done | All files written |
-| Streamlit UI (4 steps) | ✅ Done | Upload → Process → Clips → Export |
-| Transcription (faster-whisper) | ✅ Done | large-v3, CUDA, word timestamps |
-| Audio cleanup (Resemble Enhance) | ✅ Code done | Awaiting Python 3.12 venv |
-| Clip selection (Claude API) | ✅ Done | claude-sonnet-4-6, JSON response |
-| Karaoke captions (ASS) | ✅ Done | Word-level `{\kf}` timing |
-| FFmpeg export | ✅ Done | Cut + clean audio + burn captions |
-| Profanity filter | ✅ Done | 1kHz beep via torchaudio; checkbox in Step 2 |
-| Dependencies installed | ⚠️ Blocked | Python 3.14 incompatible with PyTorch |
-| First end-to-end test | ⏳ Pending | |
-
-### Blocked: Python 3.14 → PyTorch incompatibility
-
-PyTorch (required by `faster-whisper` and `resemble-enhance`) does not yet publish
-wheels for Python 3.14. The fix is to install **Python 3.12** alongside 3.14 and create
-a new venv using it. Python 3.14 can remain the system default — they coexist fine.
-
-**Steps to unblock:**
-1. Download Python 3.12 from python.org (Windows 64-bit installer)
-2. During install: uncheck "Add to PATH" to avoid conflicts
-3. Create a new venv: `C:\Python312\python.exe -m venv .venv312`
-4. Install: `.venv312\Scripts\pip install -r requirements.txt`
-5. Point VSCode to `.venv312\Scripts\python.exe`
-6. Launch: `.venv312\Scripts\streamlit run app.py`
+| Streamlit UI | ✅ Done | Upload → Process → Review & Export → Download |
+| Transcription (WhisperX) | ✅ Working | large-v3 + wav2vec2 phoneme alignment, CUDA |
+| Audio cleanup (DeepFilterNet3) | ✅ Working | 48kHz, GPU, speech-optimised denoiser |
+| Clip selection (Claude API) | ✅ Working | Optional; claude-sonnet-4-6, JSON response |
+| Karaoke captions (ASS) | ✅ Working | `{\k}` instant highlight, all-caps, 4 words/line |
+| Show profiles | ✅ Working | Per-show producer context + caption style, persisted |
+| Episode context | ✅ Working | Per-upload optional context, resets on new file |
+| Profanity filter | ✅ Working | better-profanity text censor + 1kHz audio bleep |
+| Description chyron overlay | ✅ Working | Full-width dark bar + white text via FFmpeg drawbox/drawtext |
+| SRT export | ✅ Working | YouTube upload format |
+| Bulk review table | ✅ Working | st.data_editor, inline editing, ZIP download |
+| Python 3.12 venv | ✅ Done | `.venv312` in project root |
+| Launch script | ✅ Done | `launch.bat` + desktop shortcut via `create_shortcut.ps1` |
 
 ---
 
-## Workflow (once running)
+## Workflow
 
 ```
-1. Upload       Drop a .mp4 / .mov / .mkv Streamyard recording
-2. Process      Whisper large-v3 transcribes (word timestamps)
-                Resemble Enhance cleans audio (denoise + enhance)
-3. Find Clips   Claude reads transcript, suggests 3–5 Shorts (45–90s each)
-                Review each suggestion: approve/reject, tweak start/end times
-4. Export       For each approved clip:
-                  - ASS karaoke subtitle built from Whisper word timestamps
-                  - FFmpeg cuts clip, muxes cleaned audio, burns captions
-                  - Download button appears for each output .mp4
+1. Upload       Drop a .mp4 / .mov / .mkv Streamyard recording (1080×1920 portrait)
+                Optional: fill in episode context (who's being discussed, episode notes)
+
+2. Process      DeepFilterNet3 cleans audio → 48kHz mono WAV
+                WhisperX transcribes (large-v3) then phoneme-aligns (wav2vec2)
+                Optional: profanity filter bleeps audio + censors transcript text
+
+3. Review       Editable table: ✓ Approve | Title | Start(s) | End(s) | Description
+  & Export      Optional: "Suggest Clips with Claude" populates table via AI
+                Caption style per show (sidebar) — font, size, colors, margin
+                Export format: Social / YouTube / Both
+                "Export Approved Clips" → progress bar
+
+4. Download     "Download All as ZIP" (flat zip, all files)
+                Individual download buttons per file
 ```
 
 ---
 
 ## Tech Stack
 
-| Component | Tool | Version | Notes |
-|---|---|---|---|
-| UI | Streamlit | ≥1.40 | Local browser, `streamlit run app.py` |
-| Transcription | faster-whisper | ≥1.0 | Whisper large-v3, CUDA float16 |
-| Audio cleanup | resemble-enhance | latest | Local GPU, no API cost; first run downloads ~500MB model |
-| Clip selection | Anthropic Claude | claude-sonnet-4-6 | API call, ~$0.001/video |
-| Captions | ASS subtitles | — | `{\kf}` karaoke tags, configured once in config.json |
-| Video export | FFmpeg + ffmpeg-python | ≥0.2 | libx264 + AAC, CRF 18, hardcoded captions |
+| Component | Tool | Notes |
+|---|---|---|
+| UI | Streamlit ≥1.40 | `layout="wide"`, local browser |
+| Transcription | WhisperX ≥3.8 | large-v3 + wav2vec2 forced alignment; much more accurate word timestamps than plain Whisper |
+| Audio cleanup | DeepFilterNet3 ≥0.5.6 | 48kHz, GPU/CPU, speech-optimised — significant quality upgrade over Facebook Denoiser |
+| Clip selection | Anthropic Claude (claude-sonnet-4-6) | Optional; ~$0.001/video |
+| Captions | ASS subtitles | `{\k}` instant highlight, all-caps, 4 words/line, 0.3s pause break |
+| Chyron overlay | FFmpeg drawbox + drawtext | Full-width dark bar, white text, bottom of frame |
+| Video export | FFmpeg (subprocess) | libx264 + AAC, CRF 18, faststart, `-accurate_seek` |
+| Review table | pandas + st.data_editor | Inline editing, dynamic rows |
+| ZIP download | Python zipfile | Flat archive of all output files |
+| Profanity filter | better-profanity | Text censor + audio bleep; `god` whitelisted |
 
-**Hardware:** NVIDIA RTX 4070 — used by faster-whisper (CUDA float16) and Resemble Enhance (torch CUDA)
+**Hardware:** NVIDIA RTX 4070 Laptop — CUDA used by WhisperX and DeepFilterNet3
+**Python:** 3.12 (venv at `.venv312`) — required for PyTorch CUDA wheels
+
+---
+
+## Dependency Notes
+
+### PyTorch version pinning
+WhisperX 3.8.4 requires `torch~=2.8.0` but no CUDA wheels exist for 2.8.0.
+Workaround: install `torch==2.6.0+cu124` and use `--no-deps` for whisperx.
+
+```powershell
+& ".venv312\Scripts\python.exe" -m pip install "torch==2.6.0+cu124" "torchaudio==2.6.0+cu124" --index-url https://download.pytorch.org/whl/cu124
+& ".venv312\Scripts\python.exe" -m pip install whisperx --no-deps
+& ".venv312\Scripts\python.exe" -m pip install pyannote.audio
+```
+
+### numpy conflict
+DeepFilterNet3 declares `numpy<2.0` but works fine with numpy 2.x at runtime.
+Always reinstall numpy 2.x after deepfilternet to satisfy WhisperX:
+
+```powershell
+& ".venv312\Scripts\python.exe" -m pip install "numpy>=2.1.0"
+```
 
 ---
 
@@ -88,57 +113,63 @@ a new venv using it. Python 3.14 can remain the system default — they coexist 
 ```
 streamtools/
   app.py                  Streamlit UI — 4-step workflow
-  config.py               Load/save caption style to config.json
-  config.json             Persisted style settings (gitignored)
+  config.py               Load/save show profiles + caption style to config.json
+  config.json             Persisted profiles and style settings (gitignored)
   requirements.txt        Python dependencies
+  launch.bat              Double-click launcher (activates venv, starts Streamlit)
+  create_shortcut.ps1     One-time script to create desktop shortcut
+  .streamlit/config.toml  Upload size limit (2GB)
   .env                    ANTHROPIC_API_KEY (gitignored)
   .env.example            Placeholder — safe to commit
   .gitignore
   PROJECT.md              This file
   pipeline/
     __init__.py
-    transcribe.py         faster-whisper; returns {text, words[{word,start,end}]}
-    audio_clean.py        Resemble Enhance; outputs cleaned .wav
-    filter.py             Profanity filter; replaces flagged words with 1kHz beep
-    clip_finder.py        Claude API; returns [{title,start_time,end_time,reason}]
-    captions.py           Builds .ass file with {\kf} karaoke timing per word
-    export.py             FFmpeg: cut + clean audio + burn captions → .mp4
-  output/                 Exported clips land here (gitignored)
-  temp/                   Intermediate files: raw video copy, cleaned WAV, .ass (gitignored)
+    transcribe.py         WhisperX: large-v3 transcription + wav2vec2 alignment
+    audio_clean.py        DeepFilterNet3: 48kHz speech enhancement
+    filter.py             Profanity detection, audio bleep, transcript censor
+    captions.py           ASS karaoke builder + SRT builder
+    export.py             FFmpeg clip export (social + YouTube)
+    clip_finder.py        Claude API: suggest clips from transcript
 ```
 
 ---
 
-## Configuration
+## Show Profiles
 
-### Caption style (`config.json`)
+Profiles stored in `config.json` under `"profiles"`. Each profile has:
+- `producer_context` — injected as Claude system prompt for clip suggestions
+- All caption style keys (font, size, colors, margin)
 
-Saved via the "Save Style" button in Step 4. Persists across sessions.
+Switch profiles in the sidebar. **Episode context** (Step 1) is optional per-upload
+text — who's being discussed, episode notes. Resets on new upload. Combined with
+show producer context when calling Claude.
 
-```json
-{
-  "font_name": "Arial",
-  "font_size": 18,
-  "primary_color": "&H00FFFFFF",
-  "highlight_color": "&H0000FFFF",
-  "bold": true,
-  "margin_v": 40
-}
+---
+
+## Caption Style
+
+**ASS color format:** `&HAABBGGRR` (BGR not RGB — alpha `00` = fully opaque)
+- White text: `&H00FFFFFF`
+- Warm yellow highlight (active word): `&H0000C8FF` (RGB 255,200,0)
+- Pure yellow: `&H0000FFFF`
+
+**Caption behaviour:** All-caps, `{\k}` instant-highlight, 4 words/line max,
+natural break on 0.3s pause, `Outline=6` (thick black border), `Shadow=2`.
+`margin_v` = px from bottom edge; `960` = vertical centre of 1920px frame.
+
+---
+
+## Running the App
+
+```powershell
+cd "C:\GitHub Repositories\streamtools"
+& ".venv312\Scripts\python.exe" -m streamlit run app.py
 ```
 
-**ASS color format:** `&HAABBGGRR` (note: BGR not RGB, alpha 00 = fully opaque)
-- White: `&H00FFFFFF`
-- Yellow highlight: `&H0000FFFF`
-- Black: `&H00000000`
+Or double-click `launch.bat` / the desktop shortcut.
 
-The captions target a **1080×1920 canvas** (vertical Shorts format). `margin_v` controls
-distance from the bottom edge in pixels.
-
-### Environment (`.env`)
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
+> `streamlit run app.py` alone will fail — must use the `.venv312` Python.
 
 ---
 
@@ -146,82 +177,124 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 ### `pipeline/transcribe.py`
 ```python
-transcribe(video_path: str) -> dict
+transcribe(audio_path: str) -> dict
 # Returns: {"text": str, "words": [{"word": str, "start": float, "end": float}]}
-# Model loaded once and cached in memory for the session.
+# Two-pass: Whisper large-v3 transcription → wav2vec2 phoneme alignment.
+# Models cached after first run. First run downloads ~1.5GB + ~300MB.
 ```
 
 ### `pipeline/audio_clean.py`
 ```python
 clean_audio(video_path: str, output_path: str) -> str
-# Extracts audio via FFmpeg, runs Resemble Enhance (denoise + enhance), saves WAV.
-# Returns output_path. First call downloads model weights (~500MB).
+# Extracts audio at 48kHz mono, runs DeepFilterNet3 enhancement, saves WAV.
+# Model downloaded automatically on first run (~60MB).
+```
+
+### `pipeline/filter.py`
+```python
+censor_transcript(transcript: dict) -> tuple[dict, list[str]]
+filter_profanity(audio_path: str, words: list, output_path: str) -> tuple[str, list[str]]
+# "god" whitelisted; "goddamn" still censored.
 ```
 
 ### `pipeline/clip_finder.py`
 ```python
-find_clips(transcript: dict, video_duration: float) -> list[dict]
-# Sends transcript text to Claude. Returns [{title, start_time, end_time, reason}].
-# Timestamps are clamped to [0, video_duration].
+find_clips(transcript: dict, video_duration: float, producer_context: str = "") -> list[dict]
+# producer_context = show context + "\n\nEpisode context: ..." if provided
+# Returns [{title, start_time, end_time, reason, description}]
 ```
 
 ### `pipeline/captions.py`
 ```python
-build_karaoke_ass(words: list[dict], style: dict, output_path: str, start_offset: float) -> str
-# Groups words into lines (max 8 words, breaks on 0.5s pauses).
-# Each word gets {\kf<centiseconds>} tag for karaoke highlighting.
-# start_offset subtracts clip start so timestamps are relative to the clip.
+build_karaoke_ass(words, style, output_path, start_offset=0.0) -> str
+build_srt(words, output_path, start_offset=0.0) -> str
 ```
 
 ### `pipeline/export.py`
 ```python
-export_clip(video_path, clean_audio_path, ass_path, start, end, output_path) -> str
-# FFmpeg: cuts video segment, replaces audio, burns ASS captions.
-# Output: H.264 + AAC, CRF 18, preset fast, faststart flag for web.
-
+export_clip(video_path, clean_audio_path, ass_path, start, end, output_path, description="") -> str
+export_clip_clean(video_path, clean_audio_path, start, end, output_path) -> str
 get_video_duration(video_path: str) -> float
-# Returns video duration in seconds via ffprobe.
+# subprocess + cwd=tempdir avoids Windows C: colon bug in FFmpeg filter strings.
+# Font and ASS files copied to tempdir, referenced by filename only.
 ```
 
 ---
 
-## Known Issues / Future Work
+## Known Issues / Workarounds
 
-### Near-term
-- [ ] **Python 3.12 venv** — required to unblock PyTorch/faster-whisper/resemble-enhance
-- [ ] **First end-to-end test** — run a real Streamyard video through the full pipeline
-- [x] Update `app.py` spinner text from "DeepFilterNet" to "Resemble Enhance"
+### Windows-specific
+- **FFmpeg PATH:** Hardcoded in `pipeline/export.py` and `pipeline/audio_clean.py` via
+  `os.environ["PATH"]` injection — avoids `setx` 1024-char truncation bug.
+- **FFmpeg filter path bug:** ASS and font files copied to `tempfile.gettempdir()`,
+  referenced by filename only (`cwd=tmp_dir`). FFmpeg's filter parser splits on `:`
+  so Windows drive-letter paths (`C:`) cannot appear in `-vf` filter strings.
+- **`|` in chyron text:** Escaped as `\|` in drawtext filter string.
+- **`'` in chyron text:** Replaced with Unicode `\u2019` to avoid terminating
+  the drawtext single-quoted text value.
 
-### Future features
-- [ ] **Aspect ratio options** — 9:16 (Shorts), 16:9 (YouTube), 1:1 (Instagram)
-- [ ] **Caption presets** — save/load multiple named styles (e.g. "Shorts Bold", "Subtle")
-- [ ] **Batch processing** — queue multiple videos
-- [ ] **Transcript editor** — fix transcription errors before exporting captions
-- [ ] **Full video captions** — export the full video with clean captions (no karaoke scroll, for YouTube)
-- [ ] **Screen share segments** — detect and handle screen-share portions differently
-- [ ] **Speaker diarization** — label who is speaking in multi-person recordings
+### Audio enhancement alternatives considered
+
+| Option | Status | Notes |
+|---|---|---|
+| **DeepFilterNet3** | ✅ Current | Best practical option on Windows |
+| **Facebook Denoiser** | Replaced | dns64, 16kHz — good but limited quality |
+| **Resemble Enhance** | ❌ Windows incompatible | Best quality; blocked by `deepspeed` / `libaio` — see below |
+| **noisereduce** | Not tried | Pure Python spectral subtraction; lower quality |
+
+### Resemble Enhance — Why It Doesn't Work on Windows
+
+`resemble-enhance` hard-depends on `deepspeed==0.12.4`. deepspeed:
+- Has no precompiled Windows wheels
+- Requires the full CUDA toolkit (`nvcc`), not just GPU drivers
+- Requires `libaio` — a Linux-only system library
+
+**To use Resemble Enhance in the future:**
+1. Install WSL2 (Ubuntu)
+2. Inside WSL: Python 3.12, CUDA toolkit, `pip install resemble-enhance`
+3. Run the full pipeline inside WSL, or expose a subprocess/socket interface
+   that the Windows Streamlit app calls into
 
 ---
 
 ## Integration Notes
 
 ### FFmpeg
-Must be installed system-wide and on PATH. Verify: `ffmpeg -version`
-Install via winget: `winget install ffmpeg`
+Installed via winget. Bin path hardcoded in pipeline modules:
+```
+C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.1-full_build\bin
+```
 
 ### Anthropic API
-- Key stored in `.env` as `ANTHROPIC_API_KEY`
-- Used only in `pipeline/clip_finder.py` (Step 3)
-- Cost: ~$0.001 per video (transcript is ~3,000–5,000 tokens)
+- Key in `.env` → `ANTHROPIC_API_KEY`
+- Used only in `pipeline/clip_finder.py` (optional step)
 - Model: `claude-sonnet-4-6`
 
-### Resemble Enhance
-- Runs fully locally — no API key, no cost after install
-- Downloads model weights on first run (~500MB, cached to `~/.cache`)
-- Requires PyTorch with CUDA — needs Python ≤3.12 until PyTorch adds 3.14 support
-- GitHub: https://github.com/resemble-ai/resemble-enhance
-
-### faster-whisper
-- Also requires PyTorch + CUDA
-- Uses `large-v3` model (~1.5GB, downloaded on first run to `~/.cache/huggingface`)
+### WhisperX
+- `large-v3` model (~1.5GB, `~/.cache/huggingface`)
+- `wav2vec2` alignment model (~300MB, downloaded on first run)
 - `compute_type="float16"` — optimal for RTX 4070 (12GB VRAM)
+- Words without alignment timestamps are silently skipped
+
+### DeepFilterNet3
+- Model downloaded automatically on first run (~60MB via `init_df()`)
+- Runs at 48kHz — higher quality than old 16kHz Facebook Denoiser
+- WhisperX resamples internally — no manual resampling needed
+- GPU used automatically when available
+
+### Montserrat Font
+- Not installed by default on Windows — falls back to Arial
+- Download: https://fonts.google.com/specimen/Montserrat
+- Install to `C:\Windows\Fonts\` or `C:\Users\ntmas\AppData\Local\Microsoft\Windows\Fonts\`
+
+---
+
+## Future Work
+
+- [ ] **Transcript editor** — fix transcription errors before export
+- [ ] **Batch upload** — queue multiple videos
+- [ ] **Speaker diarization** — label who is speaking (WhisperX supports via pyannote)
+- [ ] **Thumbnail generator** — still frame + text overlay for YouTube
+- [ ] **Chyron UI controls** — font size and position currently hardcoded in `export.py`
+- [ ] **Resemble Enhance via WSL** — best audio quality; blocked on Windows by deepspeed/libaio
+- [ ] **Caption presets** — save/load named styles beyond per-show profiles

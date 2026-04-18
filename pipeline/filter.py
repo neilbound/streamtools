@@ -10,7 +10,7 @@ import torch
 import torchaudio
 from better_profanity import profanity as _profanity
 
-_profanity.load_censor_words()
+_profanity.load_censor_words(whitelist_words=["god", "trashy"])
 
 
 def censor_transcript(transcript: dict) -> tuple[dict, list[str]]:
