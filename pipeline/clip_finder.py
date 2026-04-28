@@ -56,7 +56,7 @@ def _snap_end(words: list[dict], t: float, tolerance: float = 3.0, pause: float 
     return (candidates[-1]["end"] + pause) if candidates else t
 
 
-def find_clips(transcript: dict, video_duration: float, producer_context: str = "") -> list[dict]:
+def find_clips(transcript: dict, video_duration: float, producer_context: str = "", min_clip_secs: int = 45, max_clip_secs: int = 90) -> list[dict]:
     """
     Ask Claude to identify the best clip segments from a transcript.
 
@@ -84,7 +84,7 @@ def find_clips(transcript: dict, video_duration: float, producer_context: str = 
 
     prompt = f"""The video is {duration_min}m {duration_sec}s long. Below is the transcript with timestamps in [MM:SS] format every ~15 words. Use these timestamps as anchors when setting start_time and end_time — pick values that correspond to real timestamp markers so clips begin and end at natural sentence boundaries.
 
-Your task: identify 3 to 5 self-contained segments that would work well as YouTube Shorts or social media clips (45–90 seconds each). Look for:
+Your task: identify 3 to 5 self-contained segments that would work well as YouTube Shorts or social media clips ({min_clip_secs}–{max_clip_secs} seconds each). Look for:
 - Strong, punchy openings (no mid-sentence starts — begin right at a [MM:SS] marker or just after)
 - A clear single idea, insight, or story
 - Natural ending points (end after a complete sentence, not mid-thought)
