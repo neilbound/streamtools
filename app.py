@@ -55,8 +55,15 @@ def _save_cache(basename: str, transcript: dict, video_duration: float) -> None:
 _CLIP_COLS = ["approved", "title", "start_time", "end_time", "description", "reason"]
 
 st.set_page_config(page_title="streamtools", layout="wide")
+import subprocess as _sp
+try:
+    _branch = _sp.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=os.path.dirname(__file__), stderr=_sp.DEVNULL).decode().strip()
+except Exception:
+    _branch = "unknown"
+
 st.title("streamtools")
-st.caption("Upload → Process → Review & Export with karaoke captions")
+_branch_badge = f"  `{_branch}`" if _branch != "master" else ""
+st.caption(f"Upload → Process → Review & Export with karaoke captions{_branch_badge}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar — Show profiles + Caption style
