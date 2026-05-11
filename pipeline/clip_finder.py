@@ -107,7 +107,7 @@ Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds
 ]"""
 
     message = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-opus-4-6",  # upgraded from sonnet on test/model-upgrades branch
         max_tokens=1024,
         system=system,
         messages=[{"role": "user", "content": prompt}],

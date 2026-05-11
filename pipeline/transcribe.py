@@ -1,82 +1,52 @@
 """
-Transcription via WhisperX (large-v3, CUDA) with phoneme-level forced alignment.
+Transcription via Deepgram Nova-3 API with word-level timestamps.
 
-WhisperX runs two passes:
-  1. Whisper large-v3  — high-quality transcription
-  2. wav2vec2 aligner  — frame-accurate per-word timestamps
+Returns the same {"text", "words"} shape as the previous WhisperX implementation
+so the rest of the pipeline (captions, clip finder, export) is unaffected.
 
-Returns a dict with the full text and per-word timestamps.
+Deepgram is orders of magnitude faster than local WhisperX — a 1-hour recording
+transcribes in ~10 seconds via the cloud API rather than ~5 minutes locally.
+
+Requires DEEPGRAM_API_KEY in .env.
+Uses deepgram-sdk v7+ API: client.listen.v1.media.transcribe_file()
 """
 
-import whisperx
+import os
 
-_model = None
-_align_model = None
-_align_metadata = None
-_DEVICE = "cuda"
-_COMPUTE_TYPE = "float16"
-
-
-def _get_model():
-    global _model
-    if _model is None:
-        _model = whisperx.load_model("large-v3", _DEVICE, compute_type=_COMPUTE_TYPE)
-    return _model
-
-
-def _get_align_model(language: str):
-    global _align_model, _align_metadata
-    if _align_model is None or getattr(_align_model, "_language", None) != language:
-        _align_model, _align_metadata = whisperx.load_align_model(
-            language_code=language, device=_DEVICE
-        )
-        _align_model._language = language
-    return _align_model, _align_metadata
+from deepgram import DeepgramClient
 
 
 def transcribe(audio_path: str) -> dict:
     """
-    Transcribe audio with WhisperX and return phoneme-aligned word timestamps.
+    Transcribe audio_path using Deepgram Nova-3 with word-level timestamps.
 
     Args:
         audio_path: Path to a WAV file (output of audio_clean.py).
 
     Returns:
-        {
-            "text": str,
-            "words": [{"word": str, "start": float, "end": float}, ...]
-        }
+        {"text": str, "words": [{"word": str, "start": float, "end": float}, ...]}
     """
-    model = _get_model()
+    api_key = os.environ.get("DEEPGRAM_API_KEY")
+    if not api_key:
+        raise ValueError("DEEPGRAM_API_KEY not set — add it to your .env file.")
 
-    # Step 1: Whisper transcription
-    audio = whisperx.load_audio(audio_path)
-    result = model.transcribe(audio, batch_size=4)
-    language = result.get("language", "en")
+    client = DeepgramClient(api_key=api_key)
 
-    # Step 2: Forced phoneme alignment
-    align_model, metadata = _get_align_model(language)
-    aligned = whisperx.align(
-        result["segments"], align_model, metadata, audio, _DEVICE,
-        return_char_alignments=False,
+    with open(audio_path, "rb") as f:
+        audio_bytes = f.read()
+
+    response = client.listen.v1.media.transcribe_file(
+        request=audio_bytes,
+        model="nova-3",
+        smart_format=True,
     )
 
-    words = []
-    full_text_parts = []
+    alt = response.results.channels[0].alternatives[0]
 
-    for segment in aligned["segments"]:
-        full_text_parts.append(segment["text"].strip())
-        for w in segment.get("words", []):
-            # WhisperX may omit start/end on rare words — skip those
-            if "start" not in w or "end" not in w:
-                continue
-            words.append({
-                "word": w["word"],
-                "start": round(w["start"], 3),
-                "end": round(w["end"], 3),
-            })
+    words = [
+        {"word": w.word, "start": w.start, "end": w.end}
+        for w in (alt.words or [])
+        if w.start is not None and w.end is not None
+    ]
 
-    return {
-        "text": " ".join(full_text_parts),
-        "words": words,
-    }
+    return {"text": alt.transcript, "words": words}

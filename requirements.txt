@@ -1,23 +1,26 @@
-# Transcription — GPU-accelerated Whisper with word-level timestamps
-faster-whisper>=1.0.0
+# Transcription — Deepgram Nova-3 cloud API (replaces local WhisperX)
+deepgram-sdk>=3.0.0
 
-# Audio cleanup — AI speech denoising (Facebook Denoiser, pure PyTorch, no compilation)
-denoiser>=0.1.5
+# Audio cleanup — AI speech denoising (DeepFilterNet3, GPU-accelerated)
+# Install separately: see PROJECT.md for PyTorch + deepfilternet install steps
 
 # Claude API — clip selection
 anthropic>=0.40.0
 
-# FFmpeg Python bindings — video cutting and caption burning
+# FFmpeg Python bindings — video probe / duration
 ffmpeg-python>=0.2.0
 
 # Streamlit — local browser UI
 streamlit>=1.40.0
 
-# Audio I/O backend for torchaudio on Windows
+# Audio I/O backend
 soundfile>=0.12.0
 
 # Environment variable loading
 python-dotenv>=1.0.0
 
-# Profanity filtering — pure Python word list, no C extensions, compatible with Python 3.12
+# Profanity filtering
 better-profanity>=0.7.0
+
+# Data table in review UI
+pandas>=2.0.0

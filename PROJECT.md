@@ -28,11 +28,13 @@ Vertical video (1080×1920) exported natively from Streamyard via MARS (Multi-As
 | Area | Status | Notes |
 |---|---|---|
 | Project scaffolding | ✅ Done | All files written |
-| Streamlit UI | ✅ Done | Upload → Process → Review & Export → Download |
-| Transcription (WhisperX) | ✅ Working | large-v3 + wav2vec2 phoneme alignment, CUDA |
+| Streamlit UI | ✅ Done | 4-tab layout: Source → Enhance → Full Episode → Clips |
+| Portrait compose | ✅ Working | Stack 2–4 landscape recordings → 1080×1920 via NVENC |
+| Transcription (Deepgram Nova-3) | ✅ Working | Cloud API, ~10s/episode, word-level timestamps |
 | Audio cleanup (DeepFilterNet3) | ✅ Working | 48kHz, GPU, speech-optimised denoiser |
-| Clip selection (Claude API) | ✅ Working | Optional; claude-sonnet-4-6, JSON response |
+| Clip selection (Claude API) | ✅ Working | Optional; claude-opus-4-6, JSON response |
 | Karaoke captions (ASS) | ✅ Working | `{\k}` instant highlight, all-caps, 4 words/line |
+| Full Episode export | ✅ Working | Clean MP4 + SRT, or fully captioned MP4 — independent of clips workflow |
 | Show profiles | ✅ Working | Per-show producer context + caption style, persisted |
 | Episode context | ✅ Working | Per-upload optional context, resets on new file |
 | Profanity filter | ✅ Working | better-profanity text censor + 1kHz audio bleep |
@@ -47,21 +49,23 @@ Vertical video (1080×1920) exported natively from Streamyard via MARS (Multi-As
 ## Workflow
 
 ```
-1. Upload       Drop a .mp4 / .mov / .mkv Streamyard recording (1080×1920 portrait)
-                Optional: fill in episode context (who's being discussed, episode notes)
+Source tab      Option A: Upload a single Streamyard export (.mp4/.mov/.mkv)
+                Option B: Compose — stack 2–4 local landscape recordings into
+                          1080×1920 portrait (Fill/Fit mode, NVENC GPU encode)
+                "Clear session" resets all state
 
-2. Process      DeepFilterNet3 cleans audio → 48kHz mono WAV
-                WhisperX transcribes (large-v3) then phoneme-aligns (wav2vec2)
+Enhance tab     Audio Cleaning — DeepFilterNet3 → 48kHz mono WAV (independent, re-runnable)
+                Transcription — Deepgram Nova-3 → word-level timestamps (~10s/episode)
                 Optional: profanity filter bleeps audio + censors transcript text
+                Episode context (per-upload notes for Claude)
 
-3. Review       Editable table: ✓ Approve | Title | Start(s) | End(s) | Description
-  & Export      Optional: "Suggest Clips with Claude" populates table via AI
-                Caption style per show (sidebar) — font, size, colors, margin
-                Export format: Social / YouTube / Both
-                "Export Approved Clips" → progress bar
+Full Episode    Download clean MP4 + SRT for YouTube — independent of clips workflow
+tab             Or download a fully captioned MP4 for social
 
-4. Download     "Download All as ZIP" (flat zip, all files)
-                Individual download buttons per file
+Clips tab       Optional: "Suggest Clips with Claude" — Opus 4.6 analyses transcript
+                Editable table: ✓ Approve | Title | Start(s) | End(s) | Description
+                Export format: Social (burned-in captions) / YouTube / Both / SRT Only
+                "Download All as ZIP" or individual download buttons
 ```
 
 ---
@@ -70,10 +74,11 @@ Vertical video (1080×1920) exported natively from Streamyard via MARS (Multi-As
 
 | Component | Tool | Notes |
 |---|---|---|
-| UI | Streamlit ≥1.40 | `layout="wide"`, local browser |
-| Transcription | WhisperX ≥3.8 | large-v3 + wav2vec2 forced alignment; much more accurate word timestamps than plain Whisper |
-| Audio cleanup | DeepFilterNet3 ≥0.5.6 | 48kHz, GPU/CPU, speech-optimised — significant quality upgrade over Facebook Denoiser |
-| Clip selection | Anthropic Claude (claude-sonnet-4-6) | Optional; ~$0.001/video |
+| UI | Streamlit ≥1.40 | `layout="wide"`, local browser, 4-tab layout |
+| Portrait compose | FFmpeg filter_complex + NVENC | vstack 2–4 clips, amix audio, h264_nvenc -cq 18 |
+| Transcription | Deepgram Nova-3 (cloud API) | ~10s/episode, ~$0.19/45min, word-level timestamps |
+| Audio cleanup | DeepFilterNet3 ≥0.5.6 | 48kHz, GPU/CPU, speech-optimised |
+| Clip selection | Anthropic Claude (claude-opus-4-6) | Optional; JSON response |
 | Captions | ASS subtitles | `{\k}` instant highlight, all-caps, 4 words/line, 0.3s pause break |
 | Chyron overlay | FFmpeg drawbox + drawtext | Full-width dark bar, white text, bottom of frame |
 | Video export | FFmpeg (subprocess) | libx264 + AAC, CRF 18, faststart, `-accurate_seek` |
@@ -81,30 +86,38 @@ Vertical video (1080×1920) exported natively from Streamyard via MARS (Multi-As
 | ZIP download | Python zipfile | Flat archive of all output files |
 | Profanity filter | better-profanity | Text censor + audio bleep; `god` whitelisted |
 
-**Hardware:** NVIDIA RTX 4070 Laptop — CUDA used by WhisperX and DeepFilterNet3
+**Hardware:** NVIDIA RTX 4070 Laptop — CUDA used by DeepFilterNet3; NVENC used by compose_portrait
 **Python:** 3.12 (venv at `.venv312`) — required for PyTorch CUDA wheels
 
 ---
 
 ## Dependency Notes
 
-### PyTorch version pinning
-WhisperX 3.8.4 requires `torch~=2.8.0` but no CUDA wheels exist for 2.8.0.
-Workaround: install `torch==2.6.0+cu124` and use `--no-deps` for whisperx.
+### Installing the full stack
+
+`requirements.txt` covers API and utility packages. PyTorch + DeepFilterNet3 must be installed separately:
 
 ```powershell
+# 1. Install PyTorch with CUDA 12.4 wheels
 & ".venv312\Scripts\python.exe" -m pip install "torch==2.6.0+cu124" "torchaudio==2.6.0+cu124" --index-url https://download.pytorch.org/whl/cu124
-& ".venv312\Scripts\python.exe" -m pip install whisperx --no-deps
-& ".venv312\Scripts\python.exe" -m pip install pyannote.audio
+
+# 2. Install DeepFilterNet3
+& ".venv312\Scripts\python.exe" -m pip install deepfilternet
+
+# 3. Reinstall numpy — deepfilternet downgrades it; WhisperX (if used) needs >=2.1.0
+& ".venv312\Scripts\python.exe" -m pip install "numpy>=2.1.0"
+
+# 4. Install everything else
+& ".venv312\Scripts\python.exe" -m pip install -r requirements.txt
 ```
 
 ### numpy conflict
 DeepFilterNet3 declares `numpy<2.0` but works fine with numpy 2.x at runtime.
-Always reinstall numpy 2.x after deepfilternet to satisfy WhisperX:
+Always reinstall numpy 2.x after installing deepfilternet.
 
-```powershell
-& ".venv312\Scripts\python.exe" -m pip install "numpy>=2.1.0"
-```
+### Deepgram
+Free tier covers ~775 hours before any payment is required.
+`DEEPGRAM_API_KEY` must be set in `.env`.
 
 ---
 
@@ -112,25 +125,26 @@ Always reinstall numpy 2.x after deepfilternet to satisfy WhisperX:
 
 ```
 streamtools/
-  app.py                  Streamlit UI — 4-step workflow
+  app.py                  Streamlit UI — 4-tab layout (Source/Enhance/Full Episode/Clips)
   config.py               Load/save show profiles + caption style to config.json
   config.json             Persisted profiles and style settings (gitignored)
-  requirements.txt        Python dependencies
+  requirements.txt        Python dependencies (API + utils; PyTorch installed separately)
   launch.bat              Double-click launcher (activates venv, starts Streamlit)
   create_shortcut.ps1     One-time script to create desktop shortcut
   .streamlit/config.toml  Upload size limit (2GB)
-  .env                    ANTHROPIC_API_KEY (gitignored)
+  .env                    ANTHROPIC_API_KEY + DEEPGRAM_API_KEY (gitignored)
   .env.example            Placeholder — safe to commit
   .gitignore
+  CLAUDE.md               Claude Code rules for this project
   PROJECT.md              This file
   pipeline/
     __init__.py
-    transcribe.py         WhisperX: large-v3 transcription + wav2vec2 alignment
-    audio_clean.py        DeepFilterNet3: 48kHz speech enhancement
+    transcribe.py         Deepgram Nova-3 API: word-level transcription (~10s/episode)
+    audio_clean.py        DeepFilterNet3: 48kHz GPU speech enhancement
     filter.py             Profanity detection, audio bleep, transcript censor
     captions.py           ASS karaoke builder + SRT builder
-    export.py             FFmpeg clip export (social + YouTube)
-    clip_finder.py        Claude API: suggest clips from transcript
+    export.py             FFmpeg: compose_portrait, export_clip, export_clip_clean
+    clip_finder.py        Claude Opus 4.6: suggest clips from transcript
 ```
 
 ---
@@ -179,8 +193,19 @@ Or double-click `launch.bat` / the desktop shortcut.
 ```python
 transcribe(audio_path: str) -> dict
 # Returns: {"text": str, "words": [{"word": str, "start": float, "end": float}]}
-# Two-pass: Whisper large-v3 transcription → wav2vec2 phoneme alignment.
-# Models cached after first run. First run downloads ~1.5GB + ~300MB.
+# Deepgram Nova-3 API — ~10 seconds per episode. Requires DEEPGRAM_API_KEY in .env.
+# Input: 48kHz WAV from clean_audio(). Words without timestamps are silently skipped.
+```
+
+### `pipeline/export.py`
+```python
+compose_portrait(video_paths, output_path, canvas_w=1080, canvas_h=1920, fill=True) -> str
+# Stack 2–4 landscape recordings vertically into a single portrait video.
+# fill=True: scale-to-fill + center crop (recommended for talking heads)
+# fill=False: letterbox with black bars
+# Encodes with h264_nvenc -preset p4 -cq 18 (GPU intermediate).
+# Audio: amix all input tracks — each Streamyard local recording carries only that
+# participant's audio, so mixing is required.
 ```
 
 ### `pipeline/audio_clean.py`
@@ -268,13 +293,13 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
 ### Anthropic API
 - Key in `.env` → `ANTHROPIC_API_KEY`
 - Used only in `pipeline/clip_finder.py` (optional step)
-- Model: `claude-sonnet-4-6`
+- Model: `claude-opus-4-6`
 
-### WhisperX
-- `large-v3` model (~1.5GB, `~/.cache/huggingface`)
-- `wav2vec2` alignment model (~300MB, downloaded on first run)
-- `compute_type="float16"` — optimal for RTX 4070 (12GB VRAM)
-- Words without alignment timestamps are silently skipped
+### Deepgram
+- Key in `.env` → `DEEPGRAM_API_KEY`
+- Model: `nova-3`, `smart_format=True`
+- SDK: `deepgram-sdk>=3.0.0` — uses `client.listen.v1.media.transcribe_file()`
+- Free tier: ~775 hours before any payment (~$0.19/45min after that)
 
 ### DeepFilterNet3
 - Model downloaded automatically on first run (~60MB via `init_df()`)
@@ -291,10 +316,11 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
 
 ## Future Work
 
+- [ ] **MCP server** (`mcp_server.py`) — expose compose, clean, transcribe, find_clips, export as MCP tools so Claude Desktop Cowork can orchestrate the full pipeline autonomously or on a schedule
 - [ ] **Transcript editor** — fix transcription errors before export
 - [ ] **Batch upload** — queue multiple videos
-- [ ] **Speaker diarization** — label who is speaking (WhisperX supports via pyannote)
 - [ ] **Thumbnail generator** — still frame + text overlay for YouTube
 - [ ] **Chyron UI controls** — font size and position currently hardcoded in `export.py`
+- [ ] **Speaker diarization** — label who is speaking (Deepgram supports via `diarize=True`)
 - [ ] **Resemble Enhance via WSL** — best audio quality; blocked on Windows by deepspeed/libaio
 - [ ] **Caption presets** — save/load named styles beyond per-show profiles
