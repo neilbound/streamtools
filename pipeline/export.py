@@ -151,6 +151,66 @@ def export_clip_clean(
     return output_path
 
 
+def compose_portrait(
+    video_paths: list[str],
+    output_path: str,
+    canvas_w: int = 1080,
+    canvas_h: int = 1920,
+    fill: bool = True,
+) -> str:
+    """
+    Stack 2–4 landscape recordings vertically into a single portrait video.
+
+    fill=True  — scale each clip to fill its slot (center crop, no black bars)
+    fill=False — scale each clip to fit its slot (letterbox with black bars)
+
+    Audio is taken from the first input; all Streamyard local recordings
+    carry the full mixed audio so any input would work.
+    """
+    n = len(video_paths)
+    if not 2 <= n <= 4:
+        raise ValueError(f"compose_portrait requires 2–4 videos, got {n}")
+
+    slot_h = canvas_h // n
+    filter_parts = []
+
+    for i in range(n):
+        if fill:
+            filt = (
+                f"[{i}:v]scale={canvas_w}:{slot_h}:force_original_aspect_ratio=increase,"
+                f"crop={canvas_w}:{slot_h}[v{i}]"
+            )
+        else:
+            filt = (
+                f"[{i}:v]scale={canvas_w}:{slot_h}:force_original_aspect_ratio=decrease,"
+                f"pad={canvas_w}:{slot_h}:(ow-iw)/2:(oh-ih)/2:black[v{i}]"
+            )
+        filter_parts.append(filt)
+
+    vstack_in = "".join(f"[v{i}]" for i in range(n))
+    filter_parts.append(f"{vstack_in}vstack=inputs={n}[vout]")
+
+    # Mix all audio tracks — each local Streamyard recording only carries
+    # that participant's own audio, so we need to combine them all.
+    audio_in = "".join(f"[{i}:a]" for i in range(n))
+    filter_parts.append(f"{audio_in}amix=inputs={n}:duration=longest:normalize=0[aout]")
+
+    cmd = [_FFMPEG_EXE, "-y"]
+    for vp in video_paths:
+        cmd += ["-i", vp]
+    cmd += [
+        "-filter_complex", ";".join(filter_parts),
+        "-map", "[vout]",
+        "-map", "[aout]",
+        "-vcodec", "h264_nvenc", "-preset", "p4", "-cq", "18",
+        "-acodec", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    _run_ffmpeg(cmd)
+    return output_path
+
+
 def get_video_duration(video_path: str) -> float:
     """Return the duration of a video file in seconds."""
     probe = ffmpeg.probe(video_path)
