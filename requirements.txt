@@ -24,3 +24,6 @@ better-profanity>=0.7.0
 
 # Data table in review UI
 pandas>=2.0.0
+
+# MCP server — Claude Desktop Cowork integration
+mcp>=1.0.0
