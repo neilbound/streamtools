@@ -31,7 +31,7 @@ CACHE_DIR  = os.path.join(os.path.dirname(__file__), "cache")
 for _d in (TEMP_DIR, OUTPUT_DIR, CACHE_DIR):
     os.makedirs(_d, exist_ok=True)
 
-mcp = FastMCP("streamtools", timeout=600)  # 10 min — encode/clean can take several minutes
+mcp = FastMCP("streamtools")
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
