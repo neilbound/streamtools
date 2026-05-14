@@ -174,15 +174,19 @@ def compose_portrait(
     slot_h = canvas_h // n
     filter_parts = []
 
+    # Reset each video stream's timestamps to zero before stacking.
+    # Streamyard local recordings start at slightly different wall-clock times
+    # (visible in the ms offset in filenames), so raw PTS values diverge and
+    # cause audio/video drift in the composed output.
     for i in range(n):
         if fill:
             filt = (
-                f"[{i}:v]scale={canvas_w}:{slot_h}:force_original_aspect_ratio=increase,"
+                f"[{i}:v]setpts=PTS-STARTPTS,scale={canvas_w}:{slot_h}:force_original_aspect_ratio=increase,"
                 f"crop={canvas_w}:{slot_h}[v{i}]"
             )
         else:
             filt = (
-                f"[{i}:v]scale={canvas_w}:{slot_h}:force_original_aspect_ratio=decrease,"
+                f"[{i}:v]setpts=PTS-STARTPTS,scale={canvas_w}:{slot_h}:force_original_aspect_ratio=decrease,"
                 f"pad={canvas_w}:{slot_h}:(ow-iw)/2:(oh-ih)/2:black[v{i}]"
             )
         filter_parts.append(filt)
@@ -190,9 +194,12 @@ def compose_portrait(
     vstack_in = "".join(f"[v{i}]" for i in range(n))
     filter_parts.append(f"{vstack_in}vstack=inputs={n}[vout]")
 
-    # Mix all audio tracks — each local Streamyard recording only carries
-    # that participant's own audio, so we need to combine them all.
-    audio_in = "".join(f"[{i}:a]" for i in range(n))
+    # Reset audio timestamps and mix all tracks.
+    # asetpts=PTS-STARTPTS aligns each audio stream to t=0 before mixing,
+    # matching the video PTS reset above.
+    for i in range(n):
+        filter_parts.append(f"[{i}:a]asetpts=PTS-STARTPTS[a{i}]")
+    audio_in = "".join(f"[a{i}]" for i in range(n))
     filter_parts.append(f"{audio_in}amix=inputs={n}:duration=longest:normalize=0[aout]")
 
     cmd = [_FFMPEG_EXE, "-y"]
