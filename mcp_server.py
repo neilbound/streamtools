@@ -650,5 +650,110 @@ def cancel_scheduled_clip(post_id: str) -> str:
         )
 
 
+# ── Description generation tools ──────────────────────────────────────────────
+
+@mcp.tool()
+def generate_episode_descriptions(
+    transcript_path: str,
+    episode_title: str,
+    episode_notes: str = "",
+    hosts: str = "Neil and Shelly",
+) -> str:
+    """
+    Generate a full episode description package using Claude — hook title trio,
+    deep dive, must-hear moments, and platform signature block with all links.
+    Follows the show's established template. Requires ANTHROPIC_API_KEY.
+
+    Args:
+        transcript_path: Path to transcript JSON (output of transcribe_audio or pipeline).
+        episode_title:   Episode title or topic, e.g. "Men Taking Accountability Part 2".
+        episode_notes:   Optional producer notes — themes, key moments, or context to guide Claude.
+        hosts:           Host names for context. Default "Neil and Shelly".
+
+    Returns:
+        Full description package ready to copy into YouTube, plus extracted title options.
+    """
+    import config as _cfg
+    from pipeline.describe import generate_episode_descriptions as _gen
+
+    cfg   = _cfg.load()
+    brand = _cfg.active_brand(cfg)
+
+    with open(transcript_path, "r", encoding="utf-8") as f:
+        import json as _json
+        transcript = _json.load(f)
+
+    result = _gen(
+        transcript=transcript,
+        episode_title=episode_title,
+        episode_notes=episode_notes,
+        brand=brand,
+        hosts=hosts,
+    )
+
+    lines = ["=== EPISODE DESCRIPTION PACKAGE ===\n"]
+
+    if result["title_options"]:
+        lines.append("TITLE OPTIONS:")
+        for i, t in enumerate(result["title_options"], 1):
+            lines.append(f"  {i}. {t}")
+        lines.append("")
+
+    lines.append("FULL DESCRIPTION:")
+    lines.append(result["youtube_full"])
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def generate_clip_descriptions(
+    transcript_path: str,
+    clip_title: str,
+    clip_start: float,
+    clip_end: float,
+    episode_context: str = "",
+) -> str:
+    """
+    Generate platform-specific short-form descriptions for a clip:
+    YouTube Shorts description, TikTok caption, and Instagram Reels caption.
+    Uses the show's brand links and handles from the active profile.
+
+    Args:
+        transcript_path: Path to full episode transcript JSON.
+        clip_title:      Title of the clip (from suggest_clips or run_full_pipeline output).
+        clip_start:      Clip start time in seconds.
+        clip_end:        Clip end time in seconds.
+        episode_context: Brief context e.g. "Is Love Blind S11 manosphere episode".
+    """
+    import json as _json
+    import config as _cfg
+    from pipeline.describe import generate_clip_descriptions as _gen
+
+    cfg   = _cfg.load()
+    brand = _cfg.active_brand(cfg)
+
+    with open(transcript_path, "r", encoding="utf-8") as f:
+        transcript = _json.load(f)
+
+    clip_words = [
+        w for w in transcript["words"]
+        if clip_start <= w["start"] <= clip_end
+    ]
+
+    result = _gen(
+        clip_words=clip_words,
+        clip_title=clip_title,
+        episode_context=episode_context,
+        brand=brand,
+    )
+
+    return (
+        f"=== CLIP DESCRIPTIONS: {clip_title} ===\n\n"
+        f"── YOUTUBE SHORTS ──\n{result['youtube_short']}\n\n"
+        f"── TIKTOK ──\n{result['tiktok']}\n\n"
+        f"── INSTAGRAM REELS ──\n{result['instagram']}"
+    )
+
+
 if __name__ == "__main__":
     mcp.run()

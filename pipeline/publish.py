@@ -35,6 +35,10 @@ def upload_youtube(
     description: str = "",
     tags: list[str] | None = None,
     scheduled_time: str | None = None,
+    category_id: str = "22",
+    contains_synthetic_media: bool = False,
+    made_for_kids: bool = False,
+    embeddable: bool = True,
 ) -> dict:
     """
     Upload a short MP4 clip to YouTube Shorts.
@@ -43,12 +47,18 @@ def upload_youtube(
     The clip is published immediately (public) or scheduled (private + publishAt).
 
     Args:
-        clip_path:      Absolute path to the MP4 file.
-        title:          Video title (max 100 chars).
-        description:    Video description. '#Shorts' is appended automatically if absent.
-        tags:           Optional list of tag strings.
-        scheduled_time: ISO 8601 UTC string e.g. '2026-05-16T15:00:00+00:00'.
-                        If None, publishes immediately as public.
+        clip_path:                Absolute path to the MP4 file.
+        title:                    Video title (max 100 chars).
+        description:              Video description. '#Shorts' is appended automatically.
+        tags:                     Optional list of tag strings.
+        scheduled_time:           ISO 8601 UTC string e.g. '2026-05-16T15:00:00+00:00'.
+                                  If None, publishes immediately as public.
+        category_id:              YouTube category ID. Default "22" (People & Blogs).
+                                  Common: "22"=People&Blogs, "24"=Entertainment, "25"=News.
+        contains_synthetic_media: Set True if the video contains AI-generated content.
+                                  YouTube requires disclosure for AI voices/faces/scenes.
+        made_for_kids:            Set True if content is directed at children (COPPA).
+        embeddable:               Whether the video can be embedded on other sites.
 
     Returns:
         {"platform": "youtube", "video_id": str, "url": str, "scheduled": bool}
@@ -111,7 +121,6 @@ def upload_youtube(
 
     status_body = {
         "privacyStatus": privacy,
-        "selfDeclaredMadeForKids": False,
     }
     if publish_at_str:
         status_body["publishAt"] = publish_at_str
@@ -121,9 +130,14 @@ def upload_youtube(
             "title": title,
             "description": body_description,
             "tags": tags or [],
-            "categoryId": "22",  # People & Blogs — sensible default for podcasts
+            "categoryId": category_id,
         },
-        "status": status_body,
+        "status": {
+            **status_body,
+            "selfDeclaredMadeForKids": made_for_kids,
+            "embeddable": embeddable,
+            "containsSyntheticMedia": contains_synthetic_media,
+        },
     }
 
     media = MediaFileUpload(
@@ -190,6 +204,12 @@ def upload_tiktok(
     clip_path: str,
     title: str,
     tags: list[str] | None = None,
+    privacy_level: str = "PUBLIC_TO_EVERYONE",
+    disable_duet: bool = False,
+    disable_comment: bool = False,
+    disable_stitch: bool = False,
+    brand_content: bool = False,
+    brand_organic: bool = False,
 ) -> dict:
     """
     Upload a short MP4 clip to TikTok using the Content Posting API v2.
@@ -198,9 +218,15 @@ def upload_tiktok(
     Refreshes the access token automatically before upload.
 
     Args:
-        clip_path: Absolute path to the MP4 file.
-        title:     Post caption / title (max 2200 chars for TikTok).
-        tags:      Optional hashtag strings (without '#'). Appended to title.
+        clip_path:       Absolute path to the MP4 file.
+        title:           Post caption (max 2200 chars). Hashtags appended from tags.
+        tags:            Optional hashtag strings (without '#'). Appended to caption.
+        privacy_level:   "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", or "SELF_ONLY".
+        disable_duet:    Prevent other users from duetting this video.
+        disable_comment: Disable comments on this video.
+        disable_stitch:  Prevent other users from stitching this video.
+        brand_content:   True if this is paid/sponsored branded content (required by TikTok).
+        brand_organic:   True if this organically promotes a brand/product you are affiliated with.
 
     Returns:
         {"platform": "tiktok", "publish_id": str, "scheduled": False}
@@ -253,10 +279,12 @@ def upload_tiktok(
         json={
             "post_info": {
                 "title": caption,
-                "privacy_level": "PUBLIC_TO_EVERYONE",
-                "disable_duet": False,
-                "disable_comment": False,
-                "disable_stitch": False,
+                "privacy_level": privacy_level,
+                "disable_duet": disable_duet,
+                "disable_comment": disable_comment,
+                "disable_stitch": disable_stitch,
+                "brand_content_toggle": brand_content,
+                "brand_organic_toggle": brand_organic,
             },
             "source_info": {
                 "source": "FILE_UPLOAD",
@@ -309,7 +337,9 @@ def upload_tiktok(
 def upload_instagram(
     clip_path: str,
     title: str,
+    tags: list[str] | None = None,
     scheduled_time: str | None = None,
+    share_to_feed: bool = True,
 ) -> dict:
     """
     Upload a short MP4 clip to Instagram Reels via the Meta Graph API (v19.0).
@@ -318,9 +348,11 @@ def upload_instagram(
 
     Args:
         clip_path:      Absolute path to the MP4 file.
-        title:          Caption for the Reel.
+        title:          Caption for the Reel. Hashtags from tags are appended automatically.
+        tags:           Optional hashtag strings (without '#'). Appended to caption.
         scheduled_time: ISO 8601 UTC string for scheduled publish.
                         If None, publishes immediately.
+        share_to_feed:  Whether the Reel appears in the profile grid/feed (default True).
 
     Returns:
         {"platform": "instagram", "media_id": str, "scheduled": bool}
@@ -344,12 +376,19 @@ def upload_instagram(
     graph_base = "https://graph.facebook.com/v19.0"
     file_size  = os.path.getsize(clip_path)
 
+    # Build caption — append hashtags if provided
+    caption = title
+    if tags:
+        hashtags = " ".join(f"#{t.lstrip('#')}" for t in tags)
+        caption = f"{caption}\n\n{hashtags}"
+
     # Step 1: Create media container
     print("[Instagram] Creating media container...")
     container_params: dict = {
         "media_type": "REELS",
         "upload_type": "resumable",
-        "caption": title,
+        "caption": caption,
+        "share_to_feed": "true" if share_to_feed else "false",
         "access_token": access_token,
     }
 

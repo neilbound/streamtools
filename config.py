@@ -15,16 +15,34 @@ DEFAULT_STYLE = {
 _STYLE_KEYS = set(DEFAULT_STYLE.keys())
 
 
+DEFAULT_BRAND = {
+    "show_name":     "",
+    "apple_podcasts": "",
+    "spotify":       "",
+    "youtube":       "",
+    "instagram":     "",
+    "tiktok":        "",
+    "website":       "",
+    "patreon":       "",
+    "cta":           "Drop your thoughts in the comments — this conversation is just getting started.",
+}
+
+_BRAND_KEYS = set(DEFAULT_BRAND.keys())
+
+
 def _default_profile() -> dict:
-    return {"producer_context": "", **DEFAULT_STYLE}
+    return {"producer_context": "", "brand": DEFAULT_BRAND.copy(), **DEFAULT_STYLE}
 
 
 def _ensure_profile_style(profile) -> dict:
-    """Ensure a profile dict has all style keys (handles old string format and missing keys)."""
+    """Ensure a profile dict has all style keys and brand keys (handles old formats)."""
     if isinstance(profile, str):
         # Migrate old format where profile was just a context string
-        return {"producer_context": profile, **DEFAULT_STYLE}
-    return {**_default_profile(), **profile}
+        return {"producer_context": profile, "brand": DEFAULT_BRAND.copy(), **DEFAULT_STYLE}
+    result = {**_default_profile(), **profile}
+    # Ensure brand sub-dict exists and has all keys
+    result["brand"] = {**DEFAULT_BRAND, **result.get("brand", {})}
+    return result
 
 
 def load() -> dict:
@@ -77,3 +95,9 @@ def active_style(cfg: dict) -> dict:
     """Return caption style settings for the active profile."""
     p = active_profile(cfg)
     return {k: p.get(k, DEFAULT_STYLE[k]) for k in _STYLE_KEYS}
+
+
+def active_brand(cfg: dict) -> dict:
+    """Return brand/links settings for the active profile."""
+    p = active_profile(cfg)
+    return {**DEFAULT_BRAND, **p.get("brand", {})}
