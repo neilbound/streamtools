@@ -358,13 +358,14 @@ def run_full_pipeline(
     fill: bool = True,
     clips_only: bool = False,
     export_only: bool = False,
+    filter_audio: bool = True,
 ) -> str:
     """
     Run the complete podcast pipeline in the background and return immediately.
     Poll progress with check_pipeline_status using the returned status_path.
 
     Pipeline steps: compose portrait (if multiple sources) → clean audio →
-    transcribe → suggest clips → export social + YouTube clips.
+    transcribe → profanity filter → suggest clips → export social + YouTube clips.
 
     All outputs are saved to:
       output/{show_slug}_{episode_id}_{YYYY-MM-DD}/
@@ -380,6 +381,7 @@ def run_full_pipeline(
         fill:           True = scale-to-fill crop (default). False = letterbox.
         clips_only:     Skip compose/clean/transcribe — re-run suggest + export only.
         export_only:    Skip everything except export — uses clips from existing status JSON.
+        filter_audio:   Replace profanity with beep tone in audio and captions. Default True.
     """
     python_exe = os.path.join(os.path.dirname(__file__), ".venv312", "Scripts", "python.exe")
     script     = os.path.join(os.path.dirname(__file__), "run_pipeline.py")
@@ -399,6 +401,8 @@ def run_full_pipeline(
         cmd.append("--clips-only")
     if export_only:
         cmd.append("--export-only")
+    if not filter_audio:
+        cmd.append("--no-filter")
 
     # Launch as detached background process — does not block MCP request
     subprocess.Popen(

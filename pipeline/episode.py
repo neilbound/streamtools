@@ -81,6 +81,7 @@ def ensure_episode_dirs(ep_dir: str) -> dict[str, str]:
         "clips":      clips_dir,
         "portrait":   os.path.join(ep_dir, "portrait.mp4"),
         "clean":      os.path.join(ep_dir, "clean.wav"),
+        "filtered":   os.path.join(ep_dir, "filtered.wav"),
         "transcript": os.path.join(ep_dir, "transcript.json"),
         "status":     os.path.join(ep_dir, "pipeline_status.json"),
     }

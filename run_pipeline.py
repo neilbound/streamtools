@@ -42,6 +42,7 @@ from pipeline.episode import (
 from pipeline.export import compose_portrait, export_clip, export_clip_clean, get_video_duration
 from pipeline.audio_clean import clean_audio
 from pipeline.transcribe import transcribe
+from pipeline.filter import censor_transcript, filter_profanity
 from pipeline.clip_finder import find_clips
 from pipeline.captions import build_karaoke_ass, build_srt
 
@@ -64,6 +65,7 @@ def run(
     export_only: bool = False,     # re-run export only (transcript + status clips already exist)
     producer_context: str = "",
     run_date: str = "",            # override date for resuming a previous run (YYYY-MM-DD)
+    filter_audio: bool = True,     # replace profanity with beep tone in audio + captions
 ) -> str:
     """
     Run the full pipeline for one episode. Returns the episode directory path.
@@ -141,7 +143,26 @@ def run(
                 transcript = json.load(f)
             print(f"[transcribe] Skipped (resuming) — loaded {len(transcript['words']):,} words")
 
-        # ── Step 4: Suggest clips ──────────────────────────────────────────────
+        # ── Step 4: Profanity filter ───────────────────────────────────────────
+        if filter_audio and not export_only:
+            if not skip_to_clips and os.path.exists(paths["filtered"]):
+                # Resume: filtered file already exists, just re-apply censored transcript
+                _log(status_path, "filter", "Using cached filtered audio...")
+                transcript, censored = censor_transcript(transcript)
+                _log(status_path, "filter", f"Done — {len(set(censored))} unique word(s) censored" if censored else "Done — no profanity detected")
+            else:
+                _log(status_path, "filter", "Applying profanity filter...")
+                transcript, censored = censor_transcript(transcript)
+                filter_profanity(paths["clean"], transcript["words"], paths["filtered"])
+                if censored:
+                    _log(status_path, "filter", f"Done — censored {len(censored)} instance(s): {', '.join(set(censored))}")
+                else:
+                    _log(status_path, "filter", "Done — no profanity detected")
+        elif filter_audio and export_only and os.path.exists(paths["filtered"]):
+            transcript, censored = censor_transcript(transcript)
+            print(f"[filter] Skipped (resuming) — using {paths['filtered']}")
+
+        # ── Step 5: Suggest clips ──────────────────────────────────────────────
         if not export_only:
             _log(status_path, "suggest", f"Asking Claude for {min_clip}–{max_clip}s clips...")
             clips = find_clips(transcript, duration,
@@ -157,8 +178,9 @@ def run(
             clips = read_status(status_path).get("clips", [])
             print(f"[suggest] Skipped (resuming) — loaded {len(clips)} clips from status")
 
-        # ── Step 5: Export clips ───────────────────────────────────────────────
-        audio_path = paths["clean"]
+        # ── Step 6: Export clips ───────────────────────────────────────────────
+        # Use filtered audio if it exists, otherwise fall back to clean audio
+        audio_path = paths["filtered"] if filter_audio and os.path.exists(paths["filtered"]) else paths["clean"]
         exported = []
 
         for i, clip in enumerate(clips):
@@ -231,6 +253,8 @@ if __name__ == "__main__":
                         help="Re-run export only using clips from status JSON")
     parser.add_argument("--date",        default="",
                         help="Override run date (YYYY-MM-DD) to resume a previous episode folder")
+    parser.add_argument("--no-filter",   action="store_true",
+                        help="Skip profanity filter (keep raw audio and transcript)")
     args = parser.parse_args()
 
     sources = args.sources or ([args.source] if args.source else None)
@@ -248,4 +272,5 @@ if __name__ == "__main__":
         skip_to_clips=args.clips_only,
         export_only=args.export_only,
         run_date=args.date,
+        filter_audio=not args.no_filter,
     )
