@@ -189,7 +189,7 @@ def suggest_clips(
     video_duration: float,
     producer_context: str = "",
     min_duration: int = 45,
-    max_duration: int = 90,
+    max_duration: int = 50,
 ) -> str:
     """
     Use Claude Opus 4.6 to analyse the transcript and suggest the best clips for social media.
@@ -202,7 +202,7 @@ def suggest_clips(
         producer_context: Optional show context or episode notes to guide clip selection.
                           If omitted, the active show profile context from config.json is used.
         min_duration:     Minimum clip length in seconds. Default 45.
-        max_duration:     Maximum clip length in seconds. Default 90.
+        max_duration:     Maximum clip length in seconds. Default 50.
     """
     from pipeline.clip_finder import find_clips as _find_clips
 
@@ -353,7 +353,7 @@ def run_full_pipeline(
     source_paths: list[str],
     show_name: str = "",
     min_clip: int = 45,
-    max_clip: int = 90,
+    max_clip: int = 50,
     export_format: str = "both",
     fill: bool = True,
     clips_only: bool = False,
@@ -375,7 +375,7 @@ def run_full_pipeline(
                         or a single path to use as-is.
         show_name:      Show name for directory naming. Defaults to active profile.
         min_clip:       Minimum clip duration in seconds. Default 45.
-        max_clip:       Maximum clip duration in seconds. Default 90.
+        max_clip:       Maximum clip duration in seconds. Default 50.
         export_format:  "social", "youtube", or "both". Default "both".
         fill:           True = scale-to-fill crop (default). False = letterbox.
         clips_only:     Skip compose/clean/transcribe — re-run suggest + export only.

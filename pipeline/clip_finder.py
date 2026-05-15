@@ -56,7 +56,7 @@ def _snap_end(words: list[dict], t: float, tolerance: float = 3.0, pause: float 
     return (candidates[-1]["end"] + pause) if candidates else t
 
 
-def find_clips(transcript: dict, video_duration: float, producer_context: str = "", min_clip_secs: int = 45, max_clip_secs: int = 90) -> list[dict]:
+def find_clips(transcript: dict, video_duration: float, producer_context: str = "", min_clip_secs: int = 45, max_clip_secs: int = 50) -> list[dict]:
     """
     Ask Claude to identify the best clip segments from a transcript.
 

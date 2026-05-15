@@ -221,7 +221,7 @@ if __name__ == "__main__":
     parser.add_argument("--show",       default="", help="Show name (defaults to active profile)")
     parser.add_argument("--no-fill",    action="store_true", help="Letterbox instead of crop-fill")
     parser.add_argument("--min-clip",   type=int, default=45, help="Min clip duration in seconds")
-    parser.add_argument("--max-clip",   type=int, default=90, help="Max clip duration in seconds")
+    parser.add_argument("--max-clip",   type=int, default=50, help="Max clip duration in seconds")
     parser.add_argument("--format",     default="both", choices=["social", "youtube", "both"],
                         help="Export format")
     parser.add_argument("--clips-only", action="store_true",
