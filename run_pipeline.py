@@ -152,15 +152,28 @@ def run(
                 _log(status_path, "filter", f"Done — {len(set(censored))} unique word(s) censored" if censored else "Done — no profanity detected")
             else:
                 _log(status_path, "filter", "Applying profanity filter...")
+                original_words = list(transcript["words"])  # must use originals — censor_transcript replaces with **** which filter_profanity can't detect
                 transcript, censored = censor_transcript(transcript)
-                filter_profanity(paths["clean"], transcript["words"], paths["filtered"])
+                filter_profanity(paths["clean"], original_words, paths["filtered"])
                 if censored:
                     _log(status_path, "filter", f"Done — censored {len(censored)} instance(s): {', '.join(set(censored))}")
                 else:
                     _log(status_path, "filter", "Done — no profanity detected")
-        elif filter_audio and export_only and os.path.exists(paths["filtered"]):
-            transcript, censored = censor_transcript(transcript)
-            print(f"[filter] Skipped (resuming) — using {paths['filtered']}")
+        elif filter_audio and export_only:
+            if os.path.exists(paths["filtered"]):
+                original_words = list(transcript["words"])
+                transcript, censored = censor_transcript(transcript)
+                print(f"[filter] Skipped (resuming) — using {paths['filtered']}")
+            else:
+                # filtered.wav missing (e.g. deleted) — rebuild it now
+                _log(status_path, "filter", "Rebuilding filtered audio (filtered.wav missing)...")
+                original_words = list(transcript["words"])
+                transcript, censored = censor_transcript(transcript)
+                filter_profanity(paths["clean"], original_words, paths["filtered"])
+                if censored:
+                    _log(status_path, "filter", f"Done — censored {len(censored)} instance(s): {', '.join(set(censored))}")
+                else:
+                    _log(status_path, "filter", "Done — no profanity detected")
 
         # ── Step 5: Suggest clips ──────────────────────────────────────────────
         if not export_only:
