@@ -130,23 +130,42 @@ Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds
     keep = []
     for clip in clips:
         raw_start = max(prev_end, float(clip["start_time"]))
-        raw_end = min(video_duration, float(clip["end_time"]))
+        raw_end   = min(video_duration, float(clip["end_time"]))
 
-        # Snap to real word boundaries so clips don't cut mid-sentence
+        # Snap start/end to real word boundaries so clips don't cut mid-sentence
         snapped_start = _snap_start(words, raw_start)
-        snapped_end = _snap_end(words, raw_end)
+        snapped_end   = _snap_end(words, raw_end)
 
-        # Clamp
+        # Enforce max duration after snapping — snap can overshoot when Claude
+        # already returned a clip near the max and snap extends to the next sentence.
+        # Trim back to a word boundary at max_clip_secs from the snapped start.
+        duration = snapped_end - snapped_start
+        if duration > max_clip_secs:
+            trim_target = snapped_start + max_clip_secs
+            snapped_end = _snap_end(words, trim_target)
+            # Safety: if trim overshot again, hard-cap it
+            if snapped_end - snapped_start > max_clip_secs + 5:
+                snapped_end = trim_target
+
+        # Enforce min duration — skip clips that are too short after snapping
+        if snapped_end - snapped_start < min_clip_secs:
+            continue
+
+        # De-overlap and clamp to video length
         snapped_start = max(prev_end, snapped_start)
-        snapped_end = min(video_duration, snapped_end)
+        snapped_end   = min(video_duration, snapped_end)
 
         # Drop clip if it collapsed to nothing after de-overlap
         if snapped_end <= snapped_start:
             continue
 
-        clip["start_time"] = snapped_start
-        clip["end_time"] = snapped_end
+        # Return new dicts so callers always get the snapped values, not
+        # references to the original parsed JSON which may be mutated elsewhere
+        keep.append({
+            **clip,
+            "start_time": snapped_start,
+            "end_time":   snapped_end,
+        })
         prev_end = snapped_end
-        keep.append(clip)
 
     return keep
