@@ -27,3 +27,8 @@ pandas>=2.0.0
 
 # MCP server — Claude Desktop Cowork integration
 mcp>=1.0.0
+
+# Social media publishing — YouTube Shorts upload
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0

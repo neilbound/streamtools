@@ -476,5 +476,179 @@ def check_pipeline_status(status_path: str) -> str:
     return "\n".join(lines)
 
 
+# ── Publishing tools ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+def schedule_clip(
+    clip_path: str,
+    platforms: list[str],
+    title: str,
+    description: str = "",
+    scheduled_time: str = "",
+    tags: list[str] = [],
+) -> str:
+    """
+    Add a clip to the publish queue for scheduled delivery to social platforms.
+
+    The publisher daemon (publisher_daemon.py) runs every 15 minutes via Windows Task
+    Scheduler and will upload the clip when the scheduled_time is reached.
+
+    Args:
+        clip_path:      Absolute path to the exported MP4 clip.
+        platforms:      List of target platforms: "youtube", "tiktok", "instagram".
+        title:          Post title / caption.
+        description:    Longer description (used by YouTube; optional for others).
+        scheduled_time: ISO 8601 UTC datetime string, e.g. "2026-05-16T15:00:00+00:00".
+                        If empty, schedules for now (uploaded at next daemon run).
+        tags:           Optional hashtag strings (without '#').
+
+    Returns:
+        Confirmation message with the assigned post_id.
+    """
+    from pipeline.publish_queue import enqueue
+    from datetime import datetime, timezone
+
+    if not scheduled_time:
+        scheduled_time = datetime.now(tz=timezone.utc).isoformat()
+
+    post_id = enqueue(
+        clip_path=clip_path,
+        platforms=platforms,
+        title=title,
+        description=description,
+        scheduled_time_iso=scheduled_time,
+        tags=tags or [],
+    )
+
+    return (
+        f"Queued for publishing.\n"
+        f"post_id   : {post_id}\n"
+        f"Platforms : {', '.join(platforms)}\n"
+        f"Scheduled : {scheduled_time}\n"
+        f"Title     : {title}\n\n"
+        f"The daemon will upload this at or after the scheduled time.\n"
+        f"Use list_scheduled_clips to check status or cancel_scheduled_clip to remove it."
+    )
+
+
+@mcp.tool()
+def publish_clip_now(
+    clip_path: str,
+    platforms: list[str],
+    title: str,
+    description: str = "",
+    tags: list[str] = [],
+) -> str:
+    """
+    Upload and publish a clip immediately to one or more social platforms.
+
+    This runs the upload functions directly (not via the queue) and may take
+    30-120 seconds depending on file size and platform. Requires PUBLISHING_ENABLED=true
+    and valid credentials in .env.
+
+    Args:
+        clip_path:   Absolute path to the exported MP4 clip.
+        platforms:   List of target platforms: "youtube", "tiktok", "instagram".
+        title:       Post title / caption.
+        description: Longer description (used by YouTube; optional for others).
+        tags:        Optional hashtag strings (without '#').
+
+    Returns:
+        Per-platform results (video IDs, URLs, publish IDs).
+    """
+    from pipeline.publish import upload_youtube, upload_tiktok, upload_instagram
+    import traceback as _tb
+
+    uploaders = {
+        "youtube":   lambda: upload_youtube(clip_path, title, description, tags or []),
+        "tiktok":    lambda: upload_tiktok(clip_path, title, tags or []),
+        "instagram": lambda: upload_instagram(clip_path, title),
+    }
+
+    lines = [f"Publishing '{title}' to {len(platforms)} platform(s)...\n"]
+    for platform in platforms:
+        if platform not in uploaders:
+            lines.append(f"[{platform}] Unknown platform — skipped.")
+            continue
+        try:
+            result = uploaders[platform]()
+            lines.append(f"[{platform}] OK — {result}")
+        except Exception as exc:
+            lines.append(f"[{platform}] FAILED — {type(exc).__name__}: {exc}")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def list_scheduled_clips() -> str:
+    """
+    List all entries in the publish queue (pending, partial, complete, failed, cancelled).
+
+    Returns a human-readable summary of every queued post sorted by scheduled_time.
+    """
+    from pipeline.publish_queue import list_all
+
+    entries = list_all()
+
+    if not entries:
+        return "Publish queue is empty."
+
+    lines = [f"Publish queue — {len(entries)} entry(ies):\n"]
+    for e in entries:
+        status    = e.get("status", "?")
+        post_id   = e.get("post_id", "?")
+        title     = e.get("title", "(no title)")
+        platforms = ", ".join(e.get("platforms", []))
+        sched     = e.get("scheduled_time", "?")
+        clip      = e.get("clip_path", "?")
+
+        lines.append(
+            f"  [{status.upper()}] {post_id} — {title}\n"
+            f"    Platforms : {platforms}\n"
+            f"    Scheduled : {sched}\n"
+            f"    Clip      : {clip}"
+        )
+
+        results = e.get("results", {})
+        if results:
+            for platform, res in results.items():
+                if res.get("status") == "ok":
+                    url = res.get("url") or res.get("publish_id") or res.get("media_id", "")
+                    lines.append(f"    {platform}: OK ({url})")
+                else:
+                    lines.append(f"    {platform}: ERROR — {res.get('error', '?')}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+@mcp.tool()
+def cancel_scheduled_clip(post_id: str) -> str:
+    """
+    Cancel a pending scheduled post by its post_id.
+
+    Only posts with 'pending' status can be cancelled. Posts that are already
+    uploading, complete, or failed cannot be cancelled.
+
+    Args:
+        post_id: The 8-character post identifier returned by schedule_clip.
+
+    Returns:
+        Confirmation or error message.
+    """
+    from pipeline.publish_queue import cancel
+
+    success = cancel(post_id)
+
+    if success:
+        return f"Post {post_id} has been cancelled."
+    else:
+        return (
+            f"Could not cancel post {post_id}. "
+            "Either the post_id was not found, or the post is not in 'pending' status. "
+            "Use list_scheduled_clips to check the current status."
+        )
+
+
 if __name__ == "__main__":
     mcp.run()
