@@ -27,7 +27,7 @@ from pipeline.export import (
 from pipeline.filter import censor_transcript, filter_profanity
 from pipeline.transcribe import transcribe
 
-load_dotenv()
+load_dotenv(override=True)
 
 TEMP_DIR   = os.path.join(os.path.dirname(__file__), "temp")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")

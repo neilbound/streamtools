@@ -29,7 +29,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(__file__))
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 import config as _config_module
 from pipeline.episode import (
@@ -58,11 +58,12 @@ def run(
     show_name: str = "",
     fill: bool = True,
     min_clip: int = 45,
-    max_clip: int = 90,
+    max_clip: int = 50,
     export_format: str = "both",   # "social", "youtube", "both"
     skip_to_clips: bool = False,   # re-run clips + export only (transcript already exists)
     export_only: bool = False,     # re-run export only (transcript + status clips already exist)
     producer_context: str = "",
+    run_date: str = "",            # override date for resuming a previous run (YYYY-MM-DD)
 ) -> str:
     """
     Run the full pipeline for one episode. Returns the episode directory path.
@@ -75,7 +76,7 @@ def run(
         producer_context = _config_module.active_context(cfg)
     style = _config_module.active_style(cfg)
 
-    ep_dir = episode_dir(show_name, episode_id)
+    ep_dir = episode_dir(show_name, episode_id, run_date=run_date)
     paths  = ensure_episode_dirs(ep_dir)
     status_path = paths["status"]
 
@@ -228,6 +229,8 @@ if __name__ == "__main__":
                         help="Re-run suggest + export only (skip compose/clean/transcribe)")
     parser.add_argument("--export-only", action="store_true",
                         help="Re-run export only using clips from status JSON")
+    parser.add_argument("--date",        default="",
+                        help="Override run date (YYYY-MM-DD) to resume a previous episode folder")
     args = parser.parse_args()
 
     sources = args.sources or ([args.source] if args.source else None)
@@ -244,4 +247,5 @@ if __name__ == "__main__":
         export_format=args.format,
         skip_to_clips=args.clips_only,
         export_only=args.export_only,
+        run_date=args.date,
     )

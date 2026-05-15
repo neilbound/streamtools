@@ -30,7 +30,7 @@ from mcp.server.fastmcp import FastMCP
 
 # Ensure pipeline/ is importable
 sys.path.insert(0, os.path.dirname(__file__))
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 TEMP_DIR   = os.path.join(os.path.dirname(__file__), "temp")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")

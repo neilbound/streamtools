@@ -11,7 +11,7 @@ import os
 import anthropic
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 def _build_timestamped_transcript(words: list[dict]) -> str:

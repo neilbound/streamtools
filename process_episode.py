@@ -25,7 +25,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(__file__))
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 from pipeline.audio_clean import clean_audio
 from pipeline.captions import build_karaoke_ass, build_srt
