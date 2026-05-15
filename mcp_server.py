@@ -2,20 +2,27 @@
 streamtools MCP server — exposes the podcast pipeline as tools for Claude Desktop Cowork.
 
 Tools:
-  get_video_info         → duration + file size
-  compose_portrait       → stack 2-4 landscape recordings into 1080x1920
-  clean_audio            → DeepFilterNet3 speech enhancement
-  transcribe_audio       → Deepgram Nova-3, saves transcript JSON, returns path
-  suggest_clips          → Claude Opus 4.6 clip suggestions from transcript
-  export_clip_social     → burned-in karaoke captions, social MP4
-  export_clip_youtube    → clean MP4 + SRT for YouTube
+  get_video_info           → duration + file size
+  compose_portrait         → stack 2-4 landscape recordings into 1080x1920
+  clean_audio              → DeepFilterNet3 speech enhancement
+  transcribe_audio         → Deepgram Nova-3, saves transcript JSON, returns path
+  suggest_clips            → Claude Opus 4.6 clip suggestions from transcript
+  export_clip_social       → burned-in karaoke captions, social MP4
+  export_clip_youtube      → clean MP4 + SRT for YouTube
+  run_full_pipeline        → run complete pipeline in background, returns immediately
+  check_pipeline_status    → read progress/results from a running or completed pipeline
 
 Data flow: tools pass file paths. transcribe_audio saves transcript JSON to cache/;
 subsequent tools accept transcript_path to avoid putting large transcripts in context.
+
+Long-running tools (compose, clean, transcribe, export) exceed Claude Desktop's request
+timeout. Use run_full_pipeline to launch the full pipeline as a background process —
+it returns immediately with the status file path. Poll with check_pipeline_status.
 """
 
 import json
 import os
+import subprocess
 import sys
 
 from dotenv import load_dotenv
@@ -338,6 +345,131 @@ def export_clip_youtube(
         f"  SRT: {srt_path}\n"
         f"Duration: {duration:.1f}s ({start:.1f}s – {end:.1f}s)"
     )
+
+
+@mcp.tool()
+def run_full_pipeline(
+    episode_id: str,
+    source_paths: list[str],
+    show_name: str = "",
+    min_clip: int = 45,
+    max_clip: int = 90,
+    export_format: str = "both",
+    fill: bool = True,
+    clips_only: bool = False,
+    export_only: bool = False,
+) -> str:
+    """
+    Run the complete podcast pipeline in the background and return immediately.
+    Poll progress with check_pipeline_status using the returned status_path.
+
+    Pipeline steps: compose portrait (if multiple sources) → clean audio →
+    transcribe → suggest clips → export social + YouTube clips.
+
+    All outputs are saved to:
+      output/{show_slug}_{episode_id}_{YYYY-MM-DD}/
+
+    Args:
+        episode_id:     Short label for this episode, e.g. "s11e01" or "men_accountability".
+        source_paths:   List of source video paths. Provide 2-4 paths to compose a portrait,
+                        or a single path to use as-is.
+        show_name:      Show name for directory naming. Defaults to active profile.
+        min_clip:       Minimum clip duration in seconds. Default 45.
+        max_clip:       Maximum clip duration in seconds. Default 90.
+        export_format:  "social", "youtube", or "both". Default "both".
+        fill:           True = scale-to-fill crop (default). False = letterbox.
+        clips_only:     Skip compose/clean/transcribe — re-run suggest + export only.
+        export_only:    Skip everything except export — uses clips from existing status JSON.
+    """
+    python_exe = os.path.join(os.path.dirname(__file__), ".venv312", "Scripts", "python.exe")
+    script     = os.path.join(os.path.dirname(__file__), "run_pipeline.py")
+
+    cmd = [python_exe, script, "--episode", episode_id]
+    if len(source_paths) > 1:
+        cmd += ["--sources"] + source_paths
+    else:
+        cmd += ["--source", source_paths[0]]
+    if show_name:
+        cmd += ["--show", show_name]
+    cmd += ["--min-clip", str(min_clip), "--max-clip", str(max_clip)]
+    cmd += ["--format", export_format]
+    if not fill:
+        cmd.append("--no-fill")
+    if clips_only:
+        cmd.append("--clips-only")
+    if export_only:
+        cmd.append("--export-only")
+
+    # Launch as detached background process — does not block MCP request
+    subprocess.Popen(
+        cmd,
+        cwd=os.path.dirname(__file__),
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+
+    # Determine expected status file path so caller can poll it
+    from pipeline.episode import episode_dir, slugify
+    from datetime import date
+    import config as _cfg
+    cfg = _cfg.load()
+    sn  = show_name or cfg.get("active_profile", "podcast")
+    ep  = episode_dir(sn, episode_id)
+    status_path = os.path.join(ep, "pipeline_status.json")
+
+    return (
+        f"Pipeline started in background.\n"
+        f"Episode : {episode_id}\n"
+        f"Output  : {ep}\n"
+        f"Status  : {status_path}\n\n"
+        f"Use check_pipeline_status to monitor progress."
+    )
+
+
+@mcp.tool()
+def check_pipeline_status(status_path: str) -> str:
+    """
+    Read the current status of a running or completed pipeline.
+    Returns a human-readable summary of completed steps and any errors.
+
+    Args:
+        status_path: Path to pipeline_status.json returned by run_full_pipeline.
+    """
+    from pipeline.episode import read_status
+
+    if not os.path.exists(status_path):
+        return f"Status file not found yet — pipeline may still be starting up.\nExpected: {status_path}"
+
+    status = read_status(status_path)
+    state  = status.get("state", "unknown")
+    lines  = [f"State: {state.upper()}",
+              f"Episode: {status.get('episode_id', '?')}",
+              f"Show: {status.get('show', '?')}",
+              f"Started: {status.get('started', '?')}"]
+
+    steps = ["compose", "clean", "transcribe", "suggest"]
+    for step in steps:
+        if step in status:
+            lines.append(f"  ✓ {step}: {status[step].get('message', '')}")
+
+    # Count exports
+    exported = [k for k in status if k.startswith("export_")]
+    if exported:
+        lines.append(f"  ✓ exports: {len(exported)} clip(s) done")
+
+    if state == "complete":
+        clips = status.get("exported_clips", [])
+        lines.append(f"\nComplete — {len(clips)} clip(s) exported:")
+        for c in clips:
+            lines.append(f"  • {c['title']}")
+            for fmt in ("social", "youtube", "srt"):
+                if fmt in c:
+                    lines.append(f"      {fmt}: {c[fmt]}")
+        lines.append(f"Finished: {status.get('finished', '?')}")
+
+    elif state == "error":
+        lines.append(f"\nERROR: {status.get('error', 'unknown error')}")
+
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
