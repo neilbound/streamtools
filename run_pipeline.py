@@ -795,13 +795,10 @@ def run_shorts_season(
       - Horizontal 16:9 file (no 📱 emoji) — full episode video source
       - Vertical   9:16 file (with 📱 emoji) — shorts source (auto-detected)
 
-    When vertical_paths is provided (ordered list matching the detected segments),
-    shorts run as a completely separate pipeline from the episode:
+    vertical_paths (ordered list matching the detected segments) is REQUIRED.
+    Shorts run as a completely separate pipeline from the episode:
       vertical stitch → clean → transcribe → find clips → caption → export
     Video and audio both come from the vertical source — zero H/V drift.
-
-    When vertical_paths is None, falls back to exporting clips from the
-    horizontal stitched file with portrait_layout="stack_h".
 
     Segments are auto-detected and sorted by recording timestamp.
     The first segment (intro) gets at most `intro_max_clips` shorts (default 1).
@@ -823,9 +820,6 @@ def run_shorts_season(
       segments/{seg_slug}_horizontal.srt
       segment_manifest.json  — segment labels, offsets, durations, clip counts
 
-    When vertical_paths is None, only horizontal segment videos are produced
-    (named {seg_slug}_youtube.mp4 rather than _horizontal_youtube.mp4).
-
     Returns the episode directory path.
     """
     # ── Setup ──────────────────────────────────────────────────────────────────
@@ -842,6 +836,17 @@ def run_shorts_season(
     # Resolve channel from config when the caller didn't specify one
     if not channel:
         channel = pipeline_cfg["default_channel"]
+
+    # Shorts are sourced directly from the 9:16 vertical StreamYard files. The
+    # old horizontal-only fallback (stack_h split-crop) is gone, so vertical
+    # paths are required.
+    if not vertical_paths:
+        raise ValueError(
+            "run_shorts_season requires vertical_paths — the ordered list of 9:16 "
+            "vertical StreamYard files matching the detected segments. Shorts are "
+            "sourced directly from the vertical files (zero H/V drift, title cards "
+            "preserved); the horizontal stack_h fallback has been removed."
+        )
 
     ep_dir = episode_dir(show_name, episode_id, run_date=run_date, group=group)
     paths  = ensure_episode_dirs(ep_dir)
@@ -1267,37 +1272,21 @@ def run_shorts_season(
                     ass_path    = os.path.join(paths["clips"], f"{slug}.ass")
                     build_karaoke_ass(clip_words, style, ass_path,
                                       start_offset=start)
-                    if use_vertical:
-                        # Vertical source: already portrait, no layout transform needed.
-                        # Audio and video are from the same file — zero drift.
-                        export_clip(
-                            clip_video_src, clip_audio_path, ass_path,
-                            start, end, social_path, description,
-                        )
-                    else:
-                        # Horizontal stitched source: split 16:9 side-by-side into
-                        # two portrait halves and stack vertically (720×1280).
-                        export_clip(
-                            clip_video_src, clip_audio_path, ass_path,
-                            start, end, social_path, description,
-                            portrait_layout="stack_h",
-                        )
+                    # Vertical source is already portrait; audio and video come
+                    # from the same file — zero drift, no layout transform.
+                    export_clip(
+                        clip_video_src, clip_audio_path, ass_path,
+                        start, end, social_path, description,
+                    )
                     clip_files["social"] = social_path
 
                 if export_format in ("youtube", "both"):
                     yt_path  = os.path.join(paths["clips"], f"{slug}_youtube.mp4")
                     srt_path = os.path.join(paths["clips"], f"{slug}.srt")
-                    if use_vertical:
-                        export_clip_clean(
-                            clip_video_src, clip_audio_path,
-                            start, end, yt_path,
-                        )
-                    else:
-                        export_clip_clean(
-                            clip_video_src, clip_audio_path,
-                            start, end, yt_path,
-                            portrait_layout="stack_h",
-                        )
+                    export_clip_clean(
+                        clip_video_src, clip_audio_path,
+                        start, end, yt_path,
+                    )
                     build_srt(clip_words, srt_path, start_offset=start)
                     clip_files["youtube"] = yt_path
                     clip_files["srt"]     = srt_path
