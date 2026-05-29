@@ -348,7 +348,7 @@ def run_broadcast(
     skip_to_clips: bool = False,
     export_only: bool = False,
     cover_art_path: str | None = None,
-    channel: str = "neilbound",
+    channel: str = "",   # empty → resolved from active profile's pipeline.default_channel
     generate_mp3: bool = False,
 ) -> str:
     """
@@ -380,6 +380,10 @@ def run_broadcast(
     producer_context = _config_module.active_context(cfg)
     brand  = _config_module.active_brand(cfg)
     style  = _config_module.active_style(cfg)
+
+    # Resolve channel from config when the caller didn't specify one
+    if not channel:
+        channel = _config_module.active_pipeline(cfg)["default_channel"]
 
     ep_dir = episode_dir(show_name, episode_id, run_date=run_date)
     paths  = ensure_episode_dirs(ep_dir)
@@ -669,6 +673,7 @@ def _detect_segments(
     segments_dir: str,
     intro_max_clips: int = 1,
     default_max_clips: int = 3,
+    label_prefixes: list[str] | None = None,
 ) -> list[dict]:
     """
     Scan a directory for StreamYard dual-output segment pairs.
@@ -683,8 +688,16 @@ def _detect_segments(
     The first segment in recording order is treated as the intro and
     gets intro_max_clips; all others get default_max_clips.
 
+    label_prefixes: ordered list of filename prefixes to strip when building the
+                    clean segment label (e.g. "Age Of Attraction - Season 1 - ").
+                    Configured per-show via the profile's pipeline settings. The
+                    list is checked longest-first so the most specific match wins.
+
     Raises ValueError if any horizontal file has no matching vertical.
     """
+    # Strip the most specific (longest) prefix first to avoid a short prefix
+    # shadowing a longer one (e.g. "Show - " vs "Show - Season 1 - ").
+    prefixes = sorted(label_prefixes or [], key=len, reverse=True)
     import subprocess as _sp
 
     FFPROBE = os.path.join(
@@ -729,9 +742,8 @@ def _detect_segments(
             ct = ""
 
         label = hf.replace(".mp4", "")
-        # Strip common show prefix patterns for a cleaner label
-        for prefix in ["Age Of Attraction - Season 1 - ", "Age of Attraction - Season 1 - ",
-                       "Age Of Attraction - ", "Age of Attraction - "]:
+        # Strip configured show prefixes for a cleaner label (longest match first)
+        for prefix in prefixes:
             if label.startswith(prefix):
                 label = label[len(prefix):]
                 break
@@ -770,7 +782,7 @@ def run_shorts_season(
     run_date: str = "",
     export_only: bool = False,
     cover_art_path: str | None = None,
-    channel: str = "ilb",
+    channel: str = "",   # empty → resolved from active profile's pipeline.default_channel
     generate_mp3: bool = False,
     vertical_paths: list[str] | None = None,
     chyron_suffix: str = "",
@@ -783,13 +795,13 @@ def run_shorts_season(
       - Horizontal 16:9 file (no 📱 emoji) — full episode video source
       - Vertical   9:16 file (with 📱 emoji) — shorts source (auto-detected)
 
-    When vertical_paths is provided (ordered list matching the detected segments),
-    shorts run as a completely separate pipeline from the episode:
+    Shorts run as a completely separate pipeline from the episode:
       vertical stitch → clean → transcribe → find clips → caption → export
     Video and audio both come from the vertical source — zero H/V drift.
 
-    When vertical_paths is None, falls back to exporting clips from the
-    horizontal stitched file with portrait_layout="stack_h".
+    vertical_paths defaults to the vertical counterpart of each detected segment
+    (StreamYard pairs each horizontal with a 📱 vertical). Pass an explicit list
+    only to override that ordering.
 
     Segments are auto-detected and sorted by recording timestamp.
     The first segment (intro) gets at most `intro_max_clips` shorts (default 1).
@@ -811,9 +823,6 @@ def run_shorts_season(
       segments/{seg_slug}_horizontal.srt
       segment_manifest.json  — segment labels, offsets, durations, clip counts
 
-    When vertical_paths is None, only horizontal segment videos are produced
-    (named {seg_slug}_youtube.mp4 rather than _horizontal_youtube.mp4).
-
     Returns the episode directory path.
     """
     # ── Setup ──────────────────────────────────────────────────────────────────
@@ -823,15 +832,31 @@ def run_shorts_season(
     if not episode_title:
         episode_title = episode_id
     producer_context = _config_module.active_context(cfg)
-    brand  = _config_module.active_brand(cfg)
-    style  = _config_module.active_style(cfg)
+    brand    = _config_module.active_brand(cfg)
+    style    = _config_module.active_style(cfg)
+    pipeline_cfg = _config_module.active_pipeline(cfg)
+
+    # Resolve channel from config when the caller didn't specify one
+    if not channel:
+        channel = pipeline_cfg["default_channel"]
 
     ep_dir = episode_dir(show_name, episode_id, run_date=run_date, group=group)
     paths  = ensure_episode_dirs(ep_dir)
     status_path = paths["status"]
 
-    # Auto-detect segment pairs
-    segments = _detect_segments(segments_dir, intro_max_clips, default_max_clips)
+    # Auto-detect segment pairs (label prefixes are per-show, from config)
+    segments = _detect_segments(
+        segments_dir, intro_max_clips, default_max_clips,
+        label_prefixes=pipeline_cfg["segment_label_prefixes"],
+    )
+
+    # Shorts are sourced directly from the 9:16 vertical files. _detect_segments
+    # already pairs each segment with its vertical counterpart (and errors if one
+    # is missing), so derive vertical_paths from the detection by default. This
+    # avoids passing emoji-laden (📱) paths through CLI args — the reason the old
+    # one-off temp/ launcher scripts existed. An explicit list still overrides.
+    if not vertical_paths:
+        vertical_paths = [seg["vertical"] for seg in segments]
 
     write_status(status_path,
         pipeline_type="shorts_season",
@@ -1247,37 +1272,21 @@ def run_shorts_season(
                     ass_path    = os.path.join(paths["clips"], f"{slug}.ass")
                     build_karaoke_ass(clip_words, style, ass_path,
                                       start_offset=start)
-                    if use_vertical:
-                        # Vertical source: already portrait, no layout transform needed.
-                        # Audio and video are from the same file — zero drift.
-                        export_clip(
-                            clip_video_src, clip_audio_path, ass_path,
-                            start, end, social_path, description,
-                        )
-                    else:
-                        # Horizontal stitched source: split 16:9 side-by-side into
-                        # two portrait halves and stack vertically (720×1280).
-                        export_clip(
-                            clip_video_src, clip_audio_path, ass_path,
-                            start, end, social_path, description,
-                            portrait_layout="stack_h",
-                        )
+                    # Vertical source is already portrait; audio and video come
+                    # from the same file — zero drift, no layout transform.
+                    export_clip(
+                        clip_video_src, clip_audio_path, ass_path,
+                        start, end, social_path, description,
+                    )
                     clip_files["social"] = social_path
 
                 if export_format in ("youtube", "both"):
                     yt_path  = os.path.join(paths["clips"], f"{slug}_youtube.mp4")
                     srt_path = os.path.join(paths["clips"], f"{slug}.srt")
-                    if use_vertical:
-                        export_clip_clean(
-                            clip_video_src, clip_audio_path,
-                            start, end, yt_path,
-                        )
-                    else:
-                        export_clip_clean(
-                            clip_video_src, clip_audio_path,
-                            start, end, yt_path,
-                            portrait_layout="stack_h",
-                        )
+                    export_clip_clean(
+                        clip_video_src, clip_audio_path,
+                        start, end, yt_path,
+                    )
                     build_srt(clip_words, srt_path, start_offset=start)
                     clip_files["youtube"] = yt_path
                     clip_files["srt"]     = srt_path
@@ -1453,8 +1462,9 @@ if __name__ == "__main__":
                         help="Producer notes / themes to guide Claude descriptions")
     parser.add_argument("--cover-art",      default="",
                         help="Path to cover art image for podcast MP3 ID3 APIC tag")
-    parser.add_argument("--channel",        default="neilbound",
-                        help="Publishing channel, e.g. 'neilbound' or 'ilb' (default: neilbound)")
+    parser.add_argument("--channel",        default="",
+                        help="Publishing channel, e.g. 'neilbound' or 'ilb'. "
+                             "Empty → use the active profile's pipeline.default_channel.")
     parser.add_argument("--generate-mp3",   action="store_true",
                         help="Generate a podcast MP3 in addition to the video episode (off by default — upload video to Spotify directly)")
 

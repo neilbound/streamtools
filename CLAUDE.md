@@ -74,10 +74,33 @@ Vertical StreamYard files run slightly shorter than horizontal (~3.8% for AoA S1
 sub-pipeline is fully independent — it stitches, cleans, and transcribes vertical files separately,
 so all caption timestamps are native to the vertical timeline. Zero drift.
 
+## Per-Show Pipeline Config
+
+Show-specific behavior lives in each profile's `pipeline` block in `config.json`
+(accessed via `config.active_pipeline(cfg)`) — never hardcode show identity in pipeline code:
+
+| Key | Purpose |
+|---|---|
+| `default_channel` | Publishing channel when a caller passes no `channel` (e.g. `"ilb"`, `"neilbound"`) |
+| `posting_slots_utc` | Posting-time rotation, hours in UTC. Scheduler cycles through it. Default `[16, 22, 13]` (12pm/6pm/9am EST) |
+| `segment_label_prefixes` | Filename prefixes stripped to build clean segment labels, e.g. `"Age of Attraction - Season 1 - "`. Longest match wins |
+
+Channel resolution: pipeline entry points (`run_shorts_season`, `run_broadcast`,
+`process_*`, `schedule_episode_clips`) default `channel=""` and resolve empty →
+`pipeline.default_channel`. Pass an explicit channel to override per-call.
+
 ## Secrets
 
 - `.env` — `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY` — never commit
 - `config.json` — persisted show profiles — never commit (gitignored)
+
+## Running a Shorts Season
+
+Call `process_shorts_season` (MCP) or `run_pipeline.py --shorts-season` with just
+`--segments-dir`. Vertical sources are auto-derived from the detected StreamYard
+pairs — no need to pass `--vertical-paths`, and no need to hand-write `temp/`
+launcher scripts to work around emoji (📱) paths in CLI args. Pass `vertical_paths`
+only to override the auto-detected ordering.
 
 ## Git
 

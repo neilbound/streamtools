@@ -849,7 +849,7 @@ def process_broadcast_episode(
     export_format: str = "both",
     filter_audio: bool = True,
     cover_art_path: str = "",
-    channel: str = "neilbound",
+    channel: str = "",   # empty → active profile's pipeline.default_channel
     generate_mp3: bool = False,
 ) -> str:
     """
@@ -915,7 +915,8 @@ def process_broadcast_episode(
         cmd.append("--no-filter")
     if cover_art_path:
         cmd += ["--cover-art", cover_art_path]
-    cmd += ["--channel", channel]
+    if channel:
+        cmd += ["--channel", channel]
     if generate_mp3:
         cmd.append("--generate-mp3")
 
@@ -959,7 +960,7 @@ def process_shorts_season(
     export_format: str = "both",
     filter_audio: bool = True,
     cover_art_path: str = "",
-    channel: str = "ilb",
+    channel: str = "",   # empty → active profile's pipeline.default_channel
     generate_mp3: bool = False,
     vertical_paths: list[str] | None = None,
     chyron_suffix: str = "",
@@ -1009,13 +1010,15 @@ def process_shorts_season(
         export_format:        "social", "youtube", or "both". Default "both".
         filter_audio:         Apply profanity filter. Default True.
         cover_art_path:       Optional absolute path to cover art image for MP3 tags.
-        channel:              Publishing channel identifier (default "ilb").
+        channel:              Publishing channel. Empty → active profile's
+                              pipeline.default_channel.
         generate_mp3:         Also export a podcast MP3 (ID3 tagged). Default False — upload
                               the video episode directly to Spotify instead.
-        vertical_paths:       Ordered list of 9:16 vertical MP4 paths matching the
-                              auto-detected segment order. When provided, shorts run as a
-                              fully separate pipeline (vertical stitch → clean → transcribe
-                              → find clips → export) — no H/V drift, title cards preserved.
+        vertical_paths:       Optional override for the 9:16 vertical sources. By default
+                              each segment's vertical counterpart (the 📱 StreamYard file)
+                              is auto-detected, so this is rarely needed. Shorts always run
+                              as a separate vertical pipeline (stitch → clean → transcribe →
+                              find clips → export) — no H/V drift, title cards preserved.
 
     Returns:
         Status file path for polling with check_pipeline_status.
@@ -1043,7 +1046,8 @@ def process_shorts_season(
         cmd.append("--no-filter")
     if cover_art_path:
         cmd += ["--cover-art", cover_art_path]
-    cmd += ["--channel", channel]
+    if channel:
+        cmd += ["--channel", channel]
     if generate_mp3:
         cmd.append("--generate-mp3")
     if vertical_paths:
@@ -1264,7 +1268,7 @@ def review_episode_clips(episode_dir_path: str) -> str:
 @mcp.tool()
 def schedule_episode_clips(
     episode_dir_path: str,
-    channel: str = "neilbound",
+    channel: str = "",   # empty → active profile's pipeline.default_channel
     platforms: list[str] = ["youtube", "tiktok", "instagram"],
     description_overrides: dict = {},
     start_date: str = "",
@@ -1297,16 +1301,19 @@ def schedule_episode_clips(
     from pipeline.publish_queue import enqueue
     from datetime import date, datetime, timedelta, timezone
     import config as _cfg
-    _brand = _cfg.active_brand(_cfg.load())
+    _cfg_data = _cfg.load()
+    _brand    = _cfg.active_brand(_cfg_data)
+    _pipeline = _cfg.active_pipeline(_cfg_data)
 
-    # ── Optimal posting time slots (EST = UTC-4 in summer, UTC-5 in winter) ──
-    # Research-backed windows for Instagram/TikTok/YouTube Shorts engagement.
-    # Rotating schedule so consecutive days don't look automated.
-    # Times in UTC (assume EDT = UTC-4):
-    #   12pm EDT = 16:00 UTC
-    #    6pm EDT = 22:00 UTC
-    #    9am EDT = 13:00 UTC
-    _POSTING_SLOTS_UTC = [16, 22, 13, 16, 22, 13, 16]  # 7-day rotation
+    # Resolve channel from config when the caller didn't specify one
+    if not channel:
+        channel = _pipeline["default_channel"]
+
+    # ── Posting time slots (hours in UTC), from the active profile ──
+    # The scheduler cycles through these so consecutive posts don't all land at
+    # the same time / look automated. Configure per-show via pipeline.posting_slots_utc.
+    # Defaults: 12pm / 6pm / 9am EST (16 / 22 / 13 UTC at EDT = UTC-4).
+    _POSTING_SLOTS_UTC = _pipeline["posting_slots_utc"] or [16, 22, 13]
 
     status_path = os.path.join(episode_dir_path, "pipeline_status.json")
     if not os.path.exists(status_path):
@@ -1403,7 +1410,11 @@ def schedule_episode_clips(
             },
         )
 
-        local_time_label = {16: "12:00 PM EST", 22: "6:00 PM EST", 13: "9:00 AM EST"}.get(hour_utc, f"{hour_utc}:00 UTC")
+        # Convert UTC hour → EDT (UTC-4) 12-hour label for any configured slot
+        _est_hour = (hour_utc - 4) % 24
+        _ampm     = "AM" if _est_hour < 12 else "PM"
+        _disp     = _est_hour % 12 or 12
+        local_time_label = f"{_disp}:00 {_ampm} EST"
 
         # Extract full episode URL from descriptions for checklist
         import re as _re

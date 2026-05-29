@@ -33,18 +33,45 @@ DEFAULT_BRAND = {
 _BRAND_KEYS = set(DEFAULT_BRAND.keys())
 
 
+DEFAULT_PIPELINE = {
+    # Publishing channel used when a caller doesn't pass one explicitly.
+    "default_channel": "neilbound",
+    # Posting-time rotation (hours in UTC). The scheduler cycles through this
+    # list so consecutive posts don't all land at the same time / look automated.
+    # Defaults: 12pm, 6pm, 9am EST (EDT = UTC-4).
+    "posting_slots_utc": [16, 22, 13],
+    # Prefixes stripped from StreamYard segment filenames to produce clean
+    # segment labels, e.g. "Age Of Attraction - Season 1 - ". Longest match wins.
+    # Per-show — leave empty to use the raw filename (minus extension) as the label.
+    "segment_label_prefixes": [],
+}
+
+_PIPELINE_KEYS = set(DEFAULT_PIPELINE.keys())
+
+
 def _default_profile() -> dict:
-    return {"producer_context": "", "brand": DEFAULT_BRAND.copy(), **DEFAULT_STYLE}
+    return {
+        "producer_context": "",
+        "brand": DEFAULT_BRAND.copy(),
+        "pipeline": DEFAULT_PIPELINE.copy(),
+        **DEFAULT_STYLE,
+    }
 
 
 def _ensure_profile_style(profile) -> dict:
-    """Ensure a profile dict has all style keys and brand keys (handles old formats)."""
+    """Ensure a profile dict has all style, brand, and pipeline keys (handles old formats)."""
     if isinstance(profile, str):
         # Migrate old format where profile was just a context string
-        return {"producer_context": profile, "brand": DEFAULT_BRAND.copy(), **DEFAULT_STYLE}
+        return {
+            "producer_context": profile,
+            "brand": DEFAULT_BRAND.copy(),
+            "pipeline": DEFAULT_PIPELINE.copy(),
+            **DEFAULT_STYLE,
+        }
     result = {**_default_profile(), **profile}
-    # Ensure brand sub-dict exists and has all keys
-    result["brand"] = {**DEFAULT_BRAND, **result.get("brand", {})}
+    # Ensure brand and pipeline sub-dicts exist and have all keys
+    result["brand"]    = {**DEFAULT_BRAND,    **result.get("brand", {})}
+    result["pipeline"] = {**DEFAULT_PIPELINE, **result.get("pipeline", {})}
     return result
 
 
@@ -104,3 +131,9 @@ def active_brand(cfg: dict) -> dict:
     """Return brand/links settings for the active profile."""
     p = active_profile(cfg)
     return {**DEFAULT_BRAND, **p.get("brand", {})}
+
+
+def active_pipeline(cfg: dict) -> dict:
+    """Return pipeline settings (channel, posting slots, label prefixes) for the active profile."""
+    p = active_profile(cfg)
+    return {**DEFAULT_PIPELINE, **p.get("pipeline", {})}
