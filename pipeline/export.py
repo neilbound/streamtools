@@ -54,8 +54,8 @@ def _description_filter(description: str, font_basename: str) -> str:
     if not line:
         return ""
 
-    font_size = 54
-    bar_h = font_size + 48
+    font_size = 27
+    bar_h = font_size + 24
     bar_y = f"ih-{bar_h}"
     text_y = f"h-{bar_h // 2 + font_size // 2}"
 
@@ -88,14 +88,48 @@ def export_clip(
     end: float,
     output_path: str,
     description: str = "",
+    video_start: float | None = None,
+    portrait_layout: str = "none",
+    pts_scale: float = 1.0,
 ) -> str:
     """
     Cut a clip and export with cleaned audio, burned-in karaoke captions,
     and an optional chyron bar at the bottom for the description.
+
+    video_start: If provided, seek the video to this position instead of `start`.
+                 Useful when the video file is a per-segment source (e.g. a vertical
+                 segment file) while the audio is from a full stitched file.
+                 Default None uses `start` for both.
+
+    portrait_layout: "none" (default) — use video as-is (must already be portrait).
+                     "stack_h" — split a 16:9 side-by-side frame horizontally into
+                     two halves, scale each to 720×810, crop bottom to 720×640
+                     (preserving top-left logo), vstack → 720×1280 portrait.
+
+    pts_scale: Speed correction factor for H/V sync drift (h_dur / v_dur).
+               When > 1.0, the vertical file runs faster than the audio timeline;
+               seek is divided by pts_scale and setpts stretches video back to
+               match the audio duration. Default 1.0 = no correction.
     """
     duration = end - start
-    tmp_dir = tempfile.gettempdir()
+    v_ss     = video_start if video_start is not None else start
 
+    # Per-call temp dir so concurrent exports never clobber each other's staged
+    # ASS/font files (FFmpeg references them by basename via cwd=tmp_dir).
+    tmp_dir = tempfile.mkdtemp(prefix="st_export_")
+    try:
+        return _export_clip_impl(
+            video_path, clean_audio_path, ass_path, start, end, output_path,
+            description, portrait_layout, pts_scale, duration, v_ss, tmp_dir,
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _export_clip_impl(
+    video_path, clean_audio_path, ass_path, start, end, output_path,
+    description, portrait_layout, pts_scale, duration, v_ss, tmp_dir,
+) -> str:
     # Stage ASS by filename so FFmpeg can reference it without a drive-letter path
     shutil.copy2(ass_path, os.path.join(tmp_dir, "st_caps.ass"))
 
@@ -105,24 +139,77 @@ def export_clip(
         font_basename = os.path.basename(font_src)
         shutil.copy2(font_src, os.path.join(tmp_dir, font_basename))
 
-    vf = "ass=st_caps.ass"
-    desc_filter = _description_filter(description, font_basename)
-    if desc_filter:
-        vf = f"{vf},{desc_filter}"
+    # When pts_scale != 1.0: seek earlier in the (faster) vertical file and
+    # stretch its PTS back to match the audio timeline.
+    v_seek   = v_ss / pts_scale
+    v_t      = duration / pts_scale  # footage to read from vertical
 
-    cmd = [_FFMPEG_EXE, "-y",
-           "-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", video_path]
-    if clean_audio_path:
-        cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
-        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+    if portrait_layout == "stack_h":
+        # Split 16:9 side-by-side into two halves, stack vertically → 720×1280.
+        # Crop from BOTTOM so the top-left logo is preserved.
+        # Each half: crop → scale 720×810 → crop top 640 px → vstack → 720×1280.
+        stack = (
+            "[0:v]split=2[l][r];"
+            "[l]crop=iw/2:ih:0:0,scale=720:-2,crop=720:640:0:0[t];"
+            "[r]crop=iw/2:ih:iw/2:0,scale=720:-2,crop=720:640:0:0[b];"
+            "[t][b]vstack[stacked]"
+        )
+        desc_filter = _description_filter(description, font_basename)
+        if desc_filter:
+            fc = f"{stack};[stacked]ass=st_caps.ass[cap];[cap]{desc_filter}[out]"
+        else:
+            fc = f"{stack};[stacked]ass=st_caps.ass[out]"
+
+        cmd = [_FFMPEG_EXE, "-y",
+               "-accurate_seek", "-ss", str(v_seek), "-t", str(v_t), "-i", video_path]
+        if clean_audio_path:
+            cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
+        cmd += ["-filter_complex", fc,
+                "-map", "[out]",
+                "-map", "1:a:0" if clean_audio_path else "0:a:0",
+                "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
+                "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
+                output_path]
+        _run_ffmpeg(cmd, cwd=tmp_dir)
+    elif pts_scale != 1.0:
+        # Drift correction via setpts — must use filter_complex to chain with ass
+        desc_filter = _description_filter(description, font_basename)
+        pts_expr = f"(PTS-STARTPTS)*{pts_scale}"
+        if desc_filter:
+            fc = f"[0:v]setpts={pts_expr}[vs];[vs]ass=st_caps.ass[cap];[cap]{desc_filter}[out]"
+        else:
+            fc = f"[0:v]setpts={pts_expr}[vs];[vs]ass=st_caps.ass[out]"
+
+        cmd = [_FFMPEG_EXE, "-y",
+               "-accurate_seek", "-ss", str(v_seek), "-t", str(v_t), "-i", video_path]
+        if clean_audio_path:
+            cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
+        cmd += ["-filter_complex", fc,
+                "-map", "[out]",
+                "-map", "1:a:0" if clean_audio_path else "0:a:0",
+                "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
+                "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
+                output_path]
+        _run_ffmpeg(cmd, cwd=tmp_dir)
     else:
-        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
-    cmd += ["-vf", vf,
-            "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
-            "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
-            output_path]
+        vf = "ass=st_caps.ass"
+        desc_filter = _description_filter(description, font_basename)
+        if desc_filter:
+            vf = f"{vf},{desc_filter}"
 
-    _run_ffmpeg(cmd, cwd=tmp_dir)
+        cmd = [_FFMPEG_EXE, "-y",
+               "-accurate_seek", "-ss", str(v_seek), "-t", str(v_t), "-i", video_path]
+        if clean_audio_path:
+            cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
+            cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+        cmd += ["-vf", vf,
+                "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
+                "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
+                output_path]
+        _run_ffmpeg(cmd, cwd=tmp_dir)
+
     return output_path
 
 
@@ -132,22 +219,74 @@ def export_clip_clean(
     start: float,
     end: float,
     output_path: str,
+    video_start: float | None = None,
+    portrait_layout: str = "none",
+    pts_scale: float = 1.0,
 ) -> str:
-    """Export a clip with cleaned audio but no burned-in captions (for YouTube)."""
+    """
+    Export a clip with cleaned audio but no burned-in captions (for YouTube).
+
+    video_start: If provided, seek the video to this position instead of `start`.
+                 Useful when the video source is a per-segment file whose timestamps
+                 start at 0, while start/end are absolute times in the full audio.
+
+    portrait_layout: "none" (default) — use video as-is.
+                     "stack_h" — same split-stack portrait conversion as export_clip,
+                     without captions.
+
+    pts_scale: Speed correction factor for H/V sync drift (h_dur / v_dur).
+               Default 1.0 = no correction.
+    """
     duration = end - start
+    v_ss     = video_start if video_start is not None else start
+    v_seek   = v_ss / pts_scale
+    v_t      = duration / pts_scale
 
-    cmd = [_FFMPEG_EXE, "-y",
-           "-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", video_path]
-    if clean_audio_path:
-        cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
-        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+    if portrait_layout == "stack_h":
+        fc = (
+            "[0:v]split=2[l][r];"
+            "[l]crop=iw/2:ih:0:0,scale=720:-2,crop=720:640:0:0[t];"
+            "[r]crop=iw/2:ih:iw/2:0,scale=720:-2,crop=720:640:0:0[b];"
+            "[t][b]vstack[out]"
+        )
+        cmd = [_FFMPEG_EXE, "-y",
+               "-accurate_seek", "-ss", str(v_seek), "-t", str(v_t), "-i", video_path]
+        if clean_audio_path:
+            cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
+        cmd += ["-filter_complex", fc,
+                "-map", "[out]",
+                "-map", "1:a:0" if clean_audio_path else "0:a:0",
+                "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
+                "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
+                output_path]
+        _run_ffmpeg(cmd)
+    elif pts_scale != 1.0:
+        pts_expr = f"(PTS-STARTPTS)*{pts_scale}"
+        fc = f"[0:v]setpts={pts_expr}[out]"
+        cmd = [_FFMPEG_EXE, "-y",
+               "-accurate_seek", "-ss", str(v_seek), "-t", str(v_t), "-i", video_path]
+        if clean_audio_path:
+            cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
+        cmd += ["-filter_complex", fc,
+                "-map", "[out]",
+                "-map", "1:a:0" if clean_audio_path else "0:a:0",
+                "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
+                "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
+                output_path]
+        _run_ffmpeg(cmd)
     else:
-        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
-    cmd += ["-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
-            "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
-            output_path]
+        cmd = [_FFMPEG_EXE, "-y",
+               "-accurate_seek", "-ss", str(v_seek), "-t", str(v_t), "-i", video_path]
+        if clean_audio_path:
+            cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
+            cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+        else:
+            cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+        cmd += ["-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
+                "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
+                output_path]
+        _run_ffmpeg(cmd)
 
-    _run_ffmpeg(cmd)
     return output_path
 
 
@@ -216,6 +355,97 @@ def compose_portrait(
     ]
     _run_ffmpeg(cmd)
     return output_path
+
+
+def export_episode_youtube(
+    video_path: str,
+    audio_path: str,
+    output_path: str,
+) -> str:
+    """
+    Mux the full 16:9 episode video with cleaned audio and encode for YouTube.
+
+    No trimming — full duration. No subtitles burned in (SRT uploaded separately).
+
+    Stream-copies the video track (no re-encode) and only encodes the swapped
+    audio. The source is always already H.264 in an MP4 container — StreamYard
+    downloads, stream-copied segment stitches, and NVENC-composed portraits are
+    all H.264 — so a copy is lossless, YouTube-compatible, and turns a multi-minute
+    encode of an 80-minute episode into a ~10-second mux.
+
+    Args:
+        video_path:  Absolute path to the source video (16:9 StreamYard horizontal download).
+        audio_path:  Absolute path to the cleaned/filtered WAV.
+        output_path: Destination MP4 path.
+
+    Returns:
+        output_path
+    """
+    cmd = [
+        _FFMPEG_EXE, "-y",
+        "-i", video_path,
+        "-i", audio_path,
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-acodec", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        output_path,
+    ]
+    _run_ffmpeg(cmd)
+    return output_path
+
+
+def stitch_segments(
+    video_paths: list[str],
+    output_path: str,
+) -> tuple[str, list[float]]:
+    """
+    Concatenate video files in recording order into a single output file.
+
+    Uses the FFmpeg concat demuxer with stream-copy (no re-encode) — instant
+    and lossless. All inputs must share the same codec, resolution, and frame
+    rate, which is guaranteed for files from the same StreamYard session.
+
+    Args:
+        video_paths:  Ordered list of absolute paths to the source MP4s.
+        output_path:  Destination MP4 path for the stitched file.
+
+    Returns:
+        (output_path, segment_offsets) where segment_offsets[i] is the
+        wall-clock start time (seconds) of video_paths[i] in the output.
+    """
+    import json as _json
+
+    # Probe each file to get its duration and build cumulative offsets
+    offsets: list[float] = []
+    t = 0.0
+    for vp in video_paths:
+        offsets.append(t)
+        t += get_video_duration(vp)
+
+    # Write the FFmpeg concat list to a unique temp file so concurrent stitches
+    # (e.g. horizontal + vertical) never overwrite each other's list.
+    fd, list_path = tempfile.mkstemp(prefix="st_stitch_", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for vp in video_paths:
+                # Forward slashes are fine on Windows for FFmpeg concat demuxer
+                f.write(f"file '{vp.replace(chr(92), '/')}'\n")
+
+        cmd = [
+            _FFMPEG_EXE, "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", list_path,
+            "-c", "copy",
+            "-movflags", "+faststart",
+            output_path,
+        ]
+        _run_ffmpeg(cmd)
+    finally:
+        if os.path.exists(list_path):
+            os.remove(list_path)
+    return output_path, offsets
 
 
 def get_video_duration(video_path: str) -> float:

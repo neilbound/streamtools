@@ -32,3 +32,6 @@ mcp>=1.0.0
 google-api-python-client>=2.100.0
 google-auth>=2.23.0
 google-auth-oauthlib>=1.1.0
+
+# Podcast MP3 export — ID3 tag writing
+mutagen>=1.47.0

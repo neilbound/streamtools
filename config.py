@@ -25,6 +25,9 @@ DEFAULT_BRAND = {
     "website":       "",
     "patreon":       "",
     "cta":           "Drop your thoughts in the comments — this conversation is just getting started.",
+    # YouTube playlist IDs — auto-assigned on upload (optional, leave blank to skip)
+    "youtube_playlist_shorts":  "",   # e.g. "PLrIMR0zBqvr2RTuW8wBUzFbpGIgl5Jlby"
+    "youtube_playlist_podcast": "",   # e.g. "PLrIMR0zBqvr2YJal42NCH8kFzt3-t9aA7"
 }
 
 _BRAND_KEYS = set(DEFAULT_BRAND.keys())

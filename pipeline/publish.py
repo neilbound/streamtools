@@ -16,15 +16,31 @@ import traceback
 from datetime import datetime, timezone
 
 
-# ── Guard helper ───────────────────────────────────────────────────────────────
+# ── Guard + credential helpers ─────────────────────────────────────────────────
 
 def _require_publishing_enabled():
     """Raise a clear error if PUBLISHING_ENABLED is not set to 'true'."""
     if os.environ.get("PUBLISHING_ENABLED", "").lower() != "true":
         raise EnvironmentError(
             "Publishing is disabled. Set PUBLISHING_ENABLED=true in .env, "
-            "then run: python setup_credentials.py --platform <platform>"
+            "then run: python setup_credentials.py --platform <platform> --channel <channel>"
         )
+
+
+def _cred(channel: str, key: str) -> str | None:
+    """
+    Look up a credential env var with optional channel prefix.
+
+    With channel='neilbound' and key='YOUTUBE_CLIENT_ID':
+      → checks NEILBOUND_YOUTUBE_CLIENT_ID first, falls back to YOUTUBE_CLIENT_ID.
+    With channel='':
+      → checks YOUTUBE_CLIENT_ID only.
+    """
+    if channel:
+        val = os.environ.get(f"{channel.upper()}_{key}")
+        if val:
+            return val
+    return os.environ.get(key)
 
 
 # ── YouTube Shorts ─────────────────────────────────────────────────────────────
@@ -39,6 +55,8 @@ def upload_youtube(
     contains_synthetic_media: bool = False,
     made_for_kids: bool = False,
     embeddable: bool = True,
+    channel: str = "neilbound",
+    playlist_id: str = "",
 ) -> dict:
     """
     Upload a short MP4 clip to YouTube Shorts.
@@ -65,22 +83,24 @@ def upload_youtube(
     """
     _require_publishing_enabled()
 
-    # Validate credentials
-    client_id     = os.environ.get("YOUTUBE_CLIENT_ID")
-    client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET")
-    refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN")
+    client_id     = _cred(channel, "YOUTUBE_CLIENT_ID")
+    client_secret = _cred(channel, "YOUTUBE_CLIENT_SECRET")
+    refresh_token = _cred(channel, "YOUTUBE_REFRESH_TOKEN")
 
     if not client_id:
         raise EnvironmentError(
-            "YOUTUBE_CLIENT_ID not set. Run: python setup_credentials.py --platform youtube"
+            f"YOUTUBE_CLIENT_ID not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
         )
     if not client_secret:
         raise EnvironmentError(
-            "YOUTUBE_CLIENT_SECRET not set. Run: python setup_credentials.py --platform youtube"
+            f"YOUTUBE_CLIENT_SECRET not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
         )
     if not refresh_token:
         raise EnvironmentError(
-            "YOUTUBE_REFRESH_TOKEN not set. Run: python setup_credentials.py --platform youtube"
+            f"YOUTUBE_REFRESH_TOKEN not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
         )
 
     from google.oauth2.credentials import Credentials
@@ -88,7 +108,6 @@ def upload_youtube(
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 
-    # Build credentials from refresh token — refresh immediately to get a fresh access token
     creds = Credentials(
         token=None,
         refresh_token=refresh_token,
@@ -165,11 +184,225 @@ def upload_youtube(
     url = f"https://www.youtube.com/shorts/{video_id}"
     print(f"[YouTube] Upload complete: {url}")
 
+    # Add to playlist if one is configured
+    if playlist_id:
+        try:
+            youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                    }
+                },
+            ).execute()
+            print(f"[YouTube] Added to playlist: {playlist_id}")
+        except Exception as exc:
+            print(f"[YouTube] Warning: could not add to playlist ({exc})")
+
     return {
-        "platform": "youtube",
-        "video_id": video_id,
-        "url": url,
-        "scheduled": is_scheduled,
+        "platform":    "youtube",
+        "video_id":    video_id,
+        "url":         url,
+        "scheduled":   is_scheduled,
+        "playlist_id": playlist_id or None,
+    }
+
+
+# ── YouTube Full Episode ───────────────────────────────────────────────────────
+
+def upload_youtube_episode(
+    video_path: str,
+    title: str,
+    description: str = "",
+    tags: list[str] | None = None,
+    scheduled_time: str | None = None,
+    category_id: str = "22",
+    srt_path: str | None = None,
+    thumbnail_path: str | None = None,
+    contains_synthetic_media: bool = False,
+    made_for_kids: bool = False,
+    embeddable: bool = True,
+    channel: str = "neilbound",
+    playlist_id: str = "",
+) -> dict:
+    """
+    Upload a full 16:9 episode to YouTube (long-form, not Shorts).
+
+    Refreshes credentials using the stored refresh token. After upload, optionally
+    sets a custom thumbnail and uploads an SRT caption file (both non-fatal on failure).
+
+    Args:
+        video_path:               Absolute path to the episode MP4.
+        title:                    Video title (max 100 chars).
+        description:              Full episode description. '#Shorts' is NOT appended.
+        tags:                     Optional list of tag strings.
+        scheduled_time:           ISO 8601 UTC string for scheduled publish.
+                                  If None, publishes immediately as public.
+        category_id:              YouTube category ID. Default "22" (People & Blogs).
+        srt_path:                 Optional path to .srt captions file for upload.
+        thumbnail_path:           Optional path to thumbnail image (JPEG/PNG).
+        contains_synthetic_media: Set True if the video contains AI-generated content.
+        made_for_kids:            Set True if content is directed at children (COPPA).
+        embeddable:               Whether the video can be embedded on other sites.
+
+    Returns:
+        {"platform": "youtube", "video_id": str, "url": str, "scheduled": bool,
+         "captions_uploaded": bool}
+    """
+    _require_publishing_enabled()
+
+    client_id     = _cred(channel, "YOUTUBE_CLIENT_ID")
+    client_secret = _cred(channel, "YOUTUBE_CLIENT_SECRET")
+    refresh_token = _cred(channel, "YOUTUBE_REFRESH_TOKEN")
+
+    if not client_id:
+        raise EnvironmentError(
+            f"YOUTUBE_CLIENT_ID not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
+        )
+    if not client_secret:
+        raise EnvironmentError(
+            f"YOUTUBE_CLIENT_SECRET not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
+        )
+    if not refresh_token:
+        raise EnvironmentError(
+            f"YOUTUBE_REFRESH_TOKEN not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
+        )
+
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+
+    creds = Credentials(
+        token=None,
+        refresh_token=refresh_token,
+        client_id=client_id,
+        client_secret=client_secret,
+        token_uri="https://oauth2.googleapis.com/token",
+    )
+    creds.refresh(Request())
+
+    youtube = build("youtube", "v3", credentials=creds)
+
+    # Build status block
+    if scheduled_time:
+        dt = datetime.fromisoformat(scheduled_time)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        publish_at_str = dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        privacy = "private"
+        is_scheduled = True
+    else:
+        publish_at_str = None
+        privacy = "public"
+        is_scheduled = False
+
+    status_body: dict = {"privacyStatus": privacy}
+    if publish_at_str:
+        status_body["publishAt"] = publish_at_str
+
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": tags or [],
+            "categoryId": category_id,
+        },
+        "status": {
+            **status_body,
+            "selfDeclaredMadeForKids": made_for_kids,
+            "embeddable": embeddable,
+            "containsSyntheticMedia": contains_synthetic_media,
+        },
+    }
+
+    media = MediaFileUpload(
+        video_path,
+        mimetype="video/mp4",
+        resumable=True,
+        chunksize=1024 * 1024 * 5,
+    )
+
+    print(f"[YouTube Episode] Uploading: {video_path}")
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=media,
+    )
+
+    response = None
+    while response is None:
+        status_obj, response = request.next_chunk()
+        if status_obj:
+            pct = int(status_obj.progress() * 100)
+            print(f"[YouTube Episode] Upload progress: {pct}%")
+
+    video_id = response["id"]
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    print(f"[YouTube Episode] Upload complete: {url}")
+
+    # Optional: set thumbnail (non-fatal)
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        try:
+            ext = os.path.splitext(thumbnail_path)[1].lower()
+            mime = "image/png" if ext == ".png" else "image/jpeg"
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(thumbnail_path, mimetype=mime),
+            ).execute()
+            print(f"[YouTube Episode] Thumbnail uploaded.")
+        except Exception as e:
+            print(f"[YouTube Episode] Thumbnail upload failed (non-fatal): {e}")
+
+    # Optional: upload SRT captions (non-fatal)
+    captions_uploaded = False
+    if srt_path and os.path.exists(srt_path):
+        try:
+            youtube.captions().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "videoId": video_id,
+                        "language": "en",
+                        "name": "English",
+                        "isDraft": False,
+                    }
+                },
+                media_body=MediaFileUpload(srt_path, mimetype="application/octet-stream"),
+                sync=False,
+            ).execute()
+            captions_uploaded = True
+            print(f"[YouTube Episode] Captions uploaded.")
+        except Exception as e:
+            print(f"[YouTube Episode] Caption upload failed (non-fatal): {e}")
+
+    # Add to playlist if one is configured (non-fatal)
+    if playlist_id:
+        try:
+            youtube.playlistItems().insert(
+                part="snippet",
+                body={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                    }
+                },
+            ).execute()
+            print(f"[YouTube Episode] Added to playlist: {playlist_id}")
+        except Exception as exc:
+            print(f"[YouTube Episode] Warning: could not add to playlist ({exc})")
+
+    return {
+        "platform":          "youtube",
+        "video_id":          video_id,
+        "url":               url,
+        "scheduled":         is_scheduled,
+        "captions_uploaded": captions_uploaded,
+        "playlist_id":       playlist_id or None,
     }
 
 
@@ -210,6 +443,7 @@ def upload_tiktok(
     disable_stitch: bool = False,
     brand_content: bool = False,
     brand_organic: bool = False,
+    channel: str = "neilbound",
 ) -> dict:
     """
     Upload a short MP4 clip to TikTok using the Content Posting API v2.
@@ -235,26 +469,30 @@ def upload_tiktok(
 
     import requests
 
-    client_key    = os.environ.get("TIKTOK_CLIENT_KEY")
-    client_secret = os.environ.get("TIKTOK_CLIENT_SECRET")
-    access_token  = os.environ.get("TIKTOK_ACCESS_TOKEN")
-    refresh_token = os.environ.get("TIKTOK_REFRESH_TOKEN")
+    client_key    = _cred(channel, "TIKTOK_CLIENT_KEY")
+    client_secret = _cred(channel, "TIKTOK_CLIENT_SECRET")
+    access_token  = _cred(channel, "TIKTOK_ACCESS_TOKEN")
+    refresh_token = _cred(channel, "TIKTOK_REFRESH_TOKEN")
 
     if not client_key:
         raise EnvironmentError(
-            "TIKTOK_CLIENT_KEY not set. Run: python setup_credentials.py --platform tiktok"
+            f"TIKTOK_CLIENT_KEY not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform tiktok --channel {channel}"
         )
     if not client_secret:
         raise EnvironmentError(
-            "TIKTOK_CLIENT_SECRET not set. Run: python setup_credentials.py --platform tiktok"
+            f"TIKTOK_CLIENT_SECRET not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform tiktok --channel {channel}"
         )
     if not access_token:
         raise EnvironmentError(
-            "TIKTOK_ACCESS_TOKEN not set. Run: python setup_credentials.py --platform tiktok"
+            f"TIKTOK_ACCESS_TOKEN not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform tiktok --channel {channel}"
         )
     if not refresh_token:
         raise EnvironmentError(
-            "TIKTOK_REFRESH_TOKEN not set. Run: python setup_credentials.py --platform tiktok"
+            f"TIKTOK_REFRESH_TOKEN not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform tiktok --channel {channel}"
         )
 
     # Refresh token before upload to avoid mid-upload expiry
@@ -332,7 +570,21 @@ def upload_tiktok(
     }
 
 
-# ── Instagram Reels ────────────────────────────────────────────────────────────
+# ── Instagram Reels (Instagram Login API) ─────────────────────────────────────
+
+def _refresh_instagram_token(access_token: str) -> str:
+    """
+    Refresh a long-lived Instagram token (resets the 60-day expiry).
+    Facebook User Access Tokens (instagram_content_publish scope) are refreshed
+    via graph.facebook.com; Instagram Login API tokens via graph.instagram.com.
+    This function handles the Facebook token case.
+    Returns the existing token unchanged — Facebook long-lived tokens last 60 days
+    and are not refreshable via API; obtain a new one via setup_credentials.py.
+    """
+    # Facebook User Access Tokens cannot be programmatically refreshed.
+    # The token is valid for ~60 days from issue. Return as-is.
+    return access_token
+
 
 def upload_instagram(
     clip_path: str,
@@ -340,11 +592,15 @@ def upload_instagram(
     tags: list[str] | None = None,
     scheduled_time: str | None = None,
     share_to_feed: bool = True,
+    channel: str = "neilbound",
 ) -> dict:
     """
-    Upload a short MP4 clip to Instagram Reels via the Meta Graph API (v19.0).
+    Upload a short MP4 clip to Instagram Reels via the Instagram Login API.
 
-    Uses a three-step process: create media container → upload bytes → publish (or schedule).
+    Uses graph.instagram.com — no Facebook Page required. Works directly with
+    Business and Creator accounts authorized via Instagram OAuth.
+
+    Three-step process: create media container → upload bytes → publish (or schedule).
 
     Args:
         clip_path:      Absolute path to the MP4 file.
@@ -353,6 +609,7 @@ def upload_instagram(
         scheduled_time: ISO 8601 UTC string for scheduled publish.
                         If None, publishes immediately.
         share_to_feed:  Whether the Reel appears in the profile grid/feed (default True).
+        channel:        Publishing channel: "neilbound" or "ilb". Default "neilbound".
 
     Returns:
         {"platform": "instagram", "media_id": str, "scheduled": bool}
@@ -361,35 +618,42 @@ def upload_instagram(
 
     import requests
 
-    access_token = os.environ.get("INSTAGRAM_ACCESS_TOKEN")
-    user_id      = os.environ.get("INSTAGRAM_USER_ID")
+    access_token = _cred(channel, "INSTAGRAM_ACCESS_TOKEN")
+    user_id      = _cred(channel, "INSTAGRAM_USER_ID")
 
     if not access_token:
         raise EnvironmentError(
-            "INSTAGRAM_ACCESS_TOKEN not set. Run: python setup_credentials.py --platform instagram"
+            f"INSTAGRAM_ACCESS_TOKEN not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform instagram --channel {channel}"
         )
     if not user_id:
         raise EnvironmentError(
-            "INSTAGRAM_USER_ID not set. Run: python setup_credentials.py --platform instagram"
+            f"INSTAGRAM_USER_ID not set for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform instagram --channel {channel}"
         )
 
-    graph_base = "https://graph.facebook.com/v19.0"
+    import time
+
+    # Facebook User Access Tokens use graph.facebook.com.
+    # Instagram Login API tokens use graph.instagram.com.
+    # The token in .env has instagram_content_publish scope (Facebook token).
+    graph_base = "https://graph.facebook.com/v21.0"
     file_size  = os.path.getsize(clip_path)
 
-    # Build caption — append hashtags if provided
+    # Build caption
     caption = title
     if tags:
         hashtags = " ".join(f"#{t.lstrip('#')}" for t in tags)
         caption = f"{caption}\n\n{hashtags}"
 
-    # Step 1: Create media container
+    # Step 1: Create media container (resumable upload)
     print("[Instagram] Creating media container...")
     container_params: dict = {
-        "media_type": "REELS",
-        "upload_type": "resumable",
-        "caption": caption,
+        "media_type":    "REELS",
+        "upload_type":   "resumable",
+        "caption":       caption,
         "share_to_feed": "true" if share_to_feed else "false",
-        "access_token": access_token,
+        "access_token":  access_token,
     }
 
     is_scheduled = False
@@ -397,10 +661,15 @@ def upload_instagram(
         dt = datetime.fromisoformat(scheduled_time)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        unix_ts = int(dt.timestamp())
-        container_params["published"] = "false"
-        container_params["scheduled_publish_time"] = str(unix_ts)
-        is_scheduled = True
+        now_utc = datetime.now(tz=timezone.utc)
+        # Instagram requires scheduled_publish_time to be at least 1 minute in the future.
+        # If the scheduled time has already passed, publish immediately instead.
+        if dt > now_utc:
+            unix_ts = int(dt.timestamp())
+            container_params["published"] = "false"
+            container_params["scheduled_publish_time"] = str(unix_ts)
+            is_scheduled = True
+        # else: fall through and publish immediately (published param defaults to true)
 
     container_resp = requests.post(
         f"{graph_base}/{user_id}/media",
@@ -421,8 +690,8 @@ def upload_instagram(
             f"Instagram did not return an upload URI. Response: {container_data}"
         )
 
-    # Step 2: Upload file bytes to upload_uri
-    print(f"[Instagram] Uploading {file_size / 1024 / 1024:.1f} MB to resumable URI...")
+    # Step 2: Upload file bytes
+    print(f"[Instagram] Uploading {file_size / 1024 / 1024:.1f} MB...")
     with open(clip_path, "rb") as f:
         video_bytes = f.read()
 
@@ -430,18 +699,37 @@ def upload_instagram(
         upload_uri,
         data=video_bytes,
         headers={
-            "offset": "0",
-            "file_size": str(file_size),
-            "Content-Type": "application/octet-stream",
+            "Authorization": f"OAuth {access_token}",
+            "offset":        "0",
+            "file_size":     str(file_size),
+            "Content-Type":  "application/octet-stream",
         },
         timeout=300,
     )
     upload_resp.raise_for_status()
-    print("[Instagram] File uploaded.")
+    print("[Instagram] File uploaded. Waiting for processing...")
 
-    # Step 3: Publish (or leave scheduled)
+    # Step 3: Poll container status until FINISHED (Meta processes video server-side)
+    for attempt in range(24):   # up to ~2 minutes
+        time.sleep(5)
+        status_resp = requests.get(
+            f"{graph_base}/{container_id}",
+            params={"fields": "status_code", "access_token": access_token},
+            timeout=15,
+        )
+        status_resp.raise_for_status()
+        status_data = status_resp.json()
+        status_code = status_data.get("status_code", "")
+        print(f"[Instagram] Container status: {status_code} (attempt {attempt + 1})")
+        if status_code == "FINISHED":
+            break
+        if status_code in ("ERROR", "EXPIRED"):
+            raise ValueError(f"Instagram container processing failed: {status_data}")
+    else:
+        raise TimeoutError("Instagram container did not finish processing within 2 minutes.")
+
+    # Step 4: Publish (or leave scheduled)
     if is_scheduled:
-        # Scheduling is set on the container; no separate publish call needed
         print(f"[Instagram] Reel scheduled. container_id={container_id}")
         media_id = container_id
     else:
@@ -449,7 +737,7 @@ def upload_instagram(
         publish_resp = requests.post(
             f"{graph_base}/{user_id}/media_publish",
             params={
-                "creation_id": container_id,
+                "creation_id":  container_id,
                 "access_token": access_token,
             },
             timeout=60,
@@ -465,6 +753,6 @@ def upload_instagram(
 
     return {
         "platform": "instagram",
-        "media_id": media_id,
+        "media_id":  media_id,
         "scheduled": is_scheduled,
     }

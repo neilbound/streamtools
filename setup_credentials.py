@@ -6,22 +6,67 @@ Usage:
     python setup_credentials.py --platform tiktok
     python setup_credentials.py --platform instagram
 
-This script is interactive and prints the environment variable lines you need to
-add to your .env file. It does NOT write to .env directly.
+This script writes credentials directly to your .env file.
 """
 
 import argparse
 import json
 import os
+import re
 import sys
+import urllib.parse
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
+
+_ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(_ENV_PATH, override=True)
+
+
+def _write_env(values: dict[str, str]) -> None:
+    """Write or update key=value pairs in the .env file."""
+    # Read existing content
+    if os.path.exists(_ENV_PATH):
+        with open(_ENV_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        # Ensure the last line ends with a newline
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+    else:
+        lines = []
+
+    # Update existing keys or append new ones
+    updated = set()
+    new_lines = []
+    for line in lines:
+        match = re.match(r"^([A-Z_]+)\s*=", line)
+        if match and match.group(1) in values:
+            key = match.group(1)
+            new_lines.append(f"{key}={values[key]}\n")
+            updated.add(key)
+        else:
+            new_lines.append(line)
+
+    # Append any keys that weren't already in the file
+    for key, val in values.items():
+        if key not in updated:
+            new_lines.append(f"{key}={val}\n")
+
+    with open(_ENV_PATH, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
+
+    print()
+    print("=" * 60)
+    print("SUCCESS — Written to .env:")
+    print("=" * 60)
+    for key, val in values.items():
+        preview = val[:12] + "..." if len(val) > 12 else val
+        print(f"  {key}={preview}")
+    print()
 
 
 # ── YouTube OAuth setup ────────────────────────────────────────────────────────
 
-def setup_youtube():
+def setup_youtube(channel: str = "NEILBOUND"):
     """
     Interactive OAuth 2.0 setup for YouTube Data API v3.
     Opens a local browser flow on port 8080 to obtain a refresh token.
@@ -95,20 +140,17 @@ def setup_youtube():
         )
         sys.exit(1)
 
-    print()
-    print("=" * 60)
-    print("SUCCESS — Add these lines to your .env file:")
-    print("=" * 60)
-    print(f"YOUTUBE_CLIENT_ID={creds.client_id}")
-    print(f"YOUTUBE_CLIENT_SECRET={creds.client_secret}")
-    print(f"YOUTUBE_REFRESH_TOKEN={creds.refresh_token}")
-    print("PUBLISHING_ENABLED=true")
-    print()
+    _write_env({
+        f"{channel}_YOUTUBE_CLIENT_ID":     creds.client_id,
+        f"{channel}_YOUTUBE_CLIENT_SECRET": creds.client_secret,
+        f"{channel}_YOUTUBE_REFRESH_TOKEN": creds.refresh_token,
+        "PUBLISHING_ENABLED":               "true",
+    })
 
 
 # ── TikTok OAuth setup ─────────────────────────────────────────────────────────
 
-def setup_tiktok():
+def setup_tiktok(channel: str = "NEILBOUND"):
     """
     Interactive OAuth 2.0 setup for TikTok Content Posting API v2.
     Guides the user through the authorization code flow manually.
@@ -129,36 +171,73 @@ def setup_tiktok():
         print("Client Key and Client Secret are required.")
         sys.exit(1)
 
-    # Build authorization URL
-    redirect_uri = "https://www.tiktok.com/auth/tiktok/callback"  # TikTok's own callback
+    # Redirect URI — must be registered in TikTok app dashboard.
+    # TikTok does not support localhost; use a real domain (page doesn't need to exist —
+    # the auth code appears in the URL bar after TikTok redirects).
+    redirect_uri = "https://neilbound.me/tiktok-auth"
     scope        = "video.publish"
     csrf_state   = "streamtools_setup"
 
+    import base64
+    import hashlib
+    import os as _os
+    import urllib.parse
+
+    # PKCE — TikTok requires code_challenge since 2024
+    code_verifier  = base64.urlsafe_b64encode(_os.urandom(40)).rstrip(b"=").decode()
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+
+    auth_params = {
+        "client_key":            client_key,
+        "scope":                 scope,
+        "response_type":         "code",
+        "redirect_uri":          redirect_uri,
+        "state":                 csrf_state,
+        "code_challenge":        code_challenge,
+        "code_challenge_method": "S256",
+    }
     auth_url = (
-        f"https://www.tiktok.com/v2/auth/authorize/"
-        f"?client_key={client_key}"
-        f"&scope={scope}"
-        f"&response_type=code"
-        f"&redirect_uri={redirect_uri}"
-        f"&state={csrf_state}"
+        "https://www.tiktok.com/v2/auth/authorize/?"
+        + urllib.parse.urlencode(auth_params)
     )
 
     print()
-    print("Visit this URL in your browser to authorize the app:")
+    print("Opening browser for TikTok authorization...")
+    print("If it doesn't open, visit this URL manually:")
     print()
     print(auth_url)
     print()
-    print(
-        "After authorizing, you'll be redirected to a URL like:\n"
-        "  https://www.tiktok.com/auth/tiktok/callback?code=XXXX&state=streamtools_setup\n"
-        "Copy the 'code' parameter value from that URL."
-    )
+
+    import webbrowser
+    webbrowser.open(auth_url)
+
+    print()
+    print("After authorizing, TikTok will redirect to a page that may not load.")
+    print("That's fine — copy the full URL from your browser's address bar.")
+    print("It will look like:")
+    print("  https://neilbound.me/tiktok-auth?code=XXXX&state=streamtools_setup")
     print()
 
-    code = input("Paste the authorization code here: ").strip()
-    if not code:
-        print("Authorization code is required.")
+    callback_url = input("Paste the full redirect URL here: ").strip()
+    if not callback_url:
+        print("No URL provided.")
         sys.exit(1)
+
+    parsed_cb = urllib.parse.urlparse(callback_url)
+    params_cb  = urllib.parse.parse_qs(parsed_cb.query)
+
+    if "error" in params_cb:
+        print(f"Authorization failed: {params_cb['error'][0]}")
+        sys.exit(1)
+
+    if "code" not in params_cb:
+        print(f"No code found in URL: {callback_url}")
+        sys.exit(1)
+
+    code = params_cb["code"][0]
+    print("Authorization code received. Exchanging for tokens...")
 
     # Exchange code for tokens
     try:
@@ -167,7 +246,6 @@ def setup_tiktok():
         print("requests is not installed. Run: pip install requests")
         sys.exit(1)
 
-    print("Exchanging authorization code for tokens...")
     token_resp = requests.post(
         "https://open.tiktokapis.com/v2/oauth/token/",
         data={
@@ -176,6 +254,7 @@ def setup_tiktok():
             "code":           code,
             "grant_type":     "authorization_code",
             "redirect_uri":   redirect_uri,
+            "code_verifier":  code_verifier,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         timeout=30,
@@ -193,54 +272,44 @@ def setup_tiktok():
     access_token  = token_data["access_token"]
     refresh_token = token_data.get("refresh_token", "")
 
-    print()
-    print("=" * 60)
-    print("SUCCESS — Add these lines to your .env file:")
-    print("=" * 60)
-    print(f"TIKTOK_CLIENT_KEY={client_key}")
-    print(f"TIKTOK_CLIENT_SECRET={client_secret}")
-    print(f"TIKTOK_ACCESS_TOKEN={access_token}")
-    print(f"TIKTOK_REFRESH_TOKEN={refresh_token}")
-    print("PUBLISHING_ENABLED=true")
-    print()
+    _write_env({
+        f"{channel}_TIKTOK_CLIENT_KEY":     client_key,
+        f"{channel}_TIKTOK_CLIENT_SECRET":  client_secret,
+        f"{channel}_TIKTOK_ACCESS_TOKEN":   access_token,
+        f"{channel}_TIKTOK_REFRESH_TOKEN":  refresh_token,
+        "PUBLISHING_ENABLED":               "true",
+    })
 
 
-# ── Instagram (Meta Graph API) setup ───────────────────────────────────────────
+# ── Instagram Login API setup ──────────────────────────────────────────────────
 
-def setup_instagram():
+def setup_instagram(channel: str = "NEILBOUND"):
     """
-    Interactive setup for Instagram Graph API using a Meta long-lived access token.
-    Guides the user through the Meta Graph API Explorer to get a short-lived token,
-    then exchanges it for a long-lived token and finds the Instagram Business account ID.
+    Interactive setup for Instagram using the Instagram Login API.
+
+    Does NOT require a Facebook Page — works directly with Business and Creator
+    Instagram accounts via Instagram OAuth (api.instagram.com).
+
+    Pre-requisites in your Meta app:
+      1. Add the 'Instagram' product (Instagram Login)
+      2. Add https://neilbound.me/instagram-auth as a redirect URI in
+         Instagram Login → Settings → Valid OAuth Redirect URIs
     """
     print("=" * 60)
-    print("Instagram (Meta Graph API) Setup")
+    print("Instagram Login API Setup")
     print("=" * 60)
     print()
-    print("Step-by-step instructions:")
-    print()
-    print("1. Go to https://developers.facebook.com/apps/ and create or open your app.")
-    print("   Your app type must be 'Business' and have Instagram Graph API added.")
-    print()
-    print("2. Open https://developers.facebook.com/tools/explorer/")
-    print()
-    print("3. In the top right, select your app from the 'Meta App' dropdown.")
-    print()
-    print("4. Click 'Generate Access Token' and grant these permissions:")
-    print("   - instagram_basic")
-    print("   - instagram_content_publish")
-    print("   - pages_read_engagement")
-    print("   - pages_show_list")
-    print()
-    print("5. Copy the short-lived token from the 'Access Token' field.")
+    print("Pre-requisites:")
+    print("  1. Your Meta app has the 'Instagram' (Instagram Login) product added")
+    print("  2. https://neilbound.me/instagram-auth is in the app's")
+    print("     Instagram Login > Settings > Valid OAuth Redirect URIs")
     print()
 
     app_id     = input("Your Meta App ID: ").strip()
     app_secret = input("Your Meta App Secret: ").strip()
-    short_token = input("Paste the short-lived access token: ").strip()
 
-    if not app_id or not app_secret or not short_token:
-        print("App ID, App Secret, and short-lived token are all required.")
+    if not app_id or not app_secret:
+        print("App ID and App Secret are required.")
         sys.exit(1)
 
     try:
@@ -249,77 +318,128 @@ def setup_instagram():
         print("requests is not installed. Run: pip install requests")
         sys.exit(1)
 
-    # Exchange short-lived token for long-lived token (valid ~60 days)
-    print("\nExchanging short-lived token for long-lived token...")
-    exchange_resp = requests.get(
-        "https://graph.facebook.com/v19.0/oauth/access_token",
-        params={
-            "grant_type":        "fb_exchange_token",
-            "client_id":         app_id,
-            "client_secret":     app_secret,
-            "fb_exchange_token": short_token,
+    redirect_uri = "https://neilbound.me/instagram-auth"
+    scopes       = "instagram_business_basic,instagram_business_content_publish"
+
+    auth_params = {
+        "client_id":     app_id,
+        "redirect_uri":  redirect_uri,
+        "scope":         scopes,
+        "response_type": "code",
+    }
+    auth_url = "https://api.instagram.com/oauth/authorize?" + urllib.parse.urlencode(auth_params)
+
+    print()
+    print("Opening browser for Instagram authorization...")
+    print("If it doesn't open, visit this URL manually:")
+    print()
+    print(auth_url)
+    print()
+
+    import webbrowser
+    webbrowser.open(auth_url)
+
+    print()
+    print("After authorizing, Instagram will redirect to a page that may not load.")
+    print("That's fine — copy the full URL from your browser's address bar.")
+    print("It will look like:")
+    print("  https://neilbound.me/instagram-auth?code=XXXX#_")
+    print()
+
+    callback_url = input("Paste the full redirect URL here: ").strip()
+    if not callback_url:
+        print("No URL provided.")
+        sys.exit(1)
+
+    parsed_cb = urllib.parse.urlparse(callback_url)
+    params_cb  = urllib.parse.parse_qs(parsed_cb.query)
+
+    if "error" in params_cb:
+        print(f"Authorization failed: {params_cb.get('error_description', params_cb['error'])[0]}")
+        sys.exit(1)
+
+    if "code" not in params_cb:
+        print(f"No code found in URL: {callback_url}")
+        sys.exit(1)
+
+    code = params_cb["code"][0]
+    # Strip #_ suffix Instagram appends
+    code = code.split("#")[0]
+
+    print("Authorization code received. Exchanging for short-lived token...")
+
+    # Step 1: Exchange code for short-lived token
+    token_resp = requests.post(
+        "https://api.instagram.com/oauth/access_token",
+        data={
+            "client_id":     app_id,
+            "client_secret": app_secret,
+            "grant_type":    "authorization_code",
+            "redirect_uri":  redirect_uri,
+            "code":          code,
         },
         timeout=30,
     )
 
-    if exchange_resp.status_code != 200:
-        print(f"Token exchange failed (HTTP {exchange_resp.status_code}): {exchange_resp.text}")
+    if token_resp.status_code != 200:
+        print(f"Token exchange failed (HTTP {token_resp.status_code}): {token_resp.text}")
         sys.exit(1)
 
-    exchange_data = exchange_resp.json()
-    if "access_token" not in exchange_data:
-        print(f"Token exchange failed: {exchange_data}")
+    token_data = token_resp.json()
+    if "access_token" not in token_data:
+        print(f"Token exchange failed: {token_data}")
         sys.exit(1)
 
-    long_lived_token = exchange_data["access_token"]
-    print("Long-lived token obtained.")
+    short_token   = token_data["access_token"]
+    instagram_uid = str(token_data.get("user_id", ""))
 
-    # Fetch Facebook pages to locate the Instagram business account
-    print("Looking up connected Instagram Business account...")
-    pages_resp = requests.get(
-        "https://graph.facebook.com/v19.0/me/accounts",
-        params={"access_token": long_lived_token, "fields": "id,name,instagram_business_account"},
+    # Step 2: Exchange for long-lived token (~60 days)
+    print("Exchanging for long-lived token...")
+    ll_resp = requests.get(
+        "https://graph.instagram.com/access_token",
+        params={
+            "grant_type":        "ig_exchange_token",
+            "client_secret":     app_secret,
+            "access_token":      short_token,
+        },
         timeout=30,
     )
 
-    if pages_resp.status_code != 200:
-        print(f"Could not fetch pages (HTTP {pages_resp.status_code}): {pages_resp.text}")
+    if ll_resp.status_code != 200:
+        print(f"Long-lived token exchange failed (HTTP {ll_resp.status_code}): {ll_resp.text}")
         sys.exit(1)
 
-    pages_data = pages_resp.json()
-    pages      = pages_data.get("data", [])
+    ll_data = ll_resp.json()
+    if "access_token" not in ll_data:
+        print(f"Long-lived token exchange failed: {ll_data}")
+        sys.exit(1)
 
-    instagram_user_id = None
-    for page in pages:
-        ig_account = page.get("instagram_business_account")
-        if ig_account:
-            instagram_user_id = ig_account["id"]
-            print(f"Found Instagram Business account: {instagram_user_id} (on page: {page['name']})")
-            break
+    long_lived_token = ll_data["access_token"]
 
-    if not instagram_user_id:
-        print(
-            "\nNo Instagram Business account found linked to your pages.\n"
-            "Make sure your Instagram account is:\n"
-            "  1. A Business or Creator account (not Personal)\n"
-            "  2. Linked to your Facebook Page in Instagram Settings > Linked Accounts"
+    # Step 3: Get Instagram user ID and username if not in token response
+    if not instagram_uid:
+        me_resp = requests.get(
+            "https://graph.instagram.com/me",
+            params={"fields": "id,username", "access_token": long_lived_token},
+            timeout=30,
         )
-        print(
-            "\nIf you already know your Instagram User ID, you can set it manually.\n"
-        )
-        instagram_user_id = input("Enter Instagram User ID manually (or press Enter to abort): ").strip()
-        if not instagram_user_id:
-            sys.exit(1)
+        me_data = me_resp.json()
+        instagram_uid = str(me_data.get("id", ""))
+        username      = me_data.get("username", "")
+        print(f"Instagram account: @{username} (id: {instagram_uid})")
+    else:
+        print(f"Instagram user ID: {instagram_uid}")
 
+    _write_env({
+        f"{channel}_INSTAGRAM_APP_ID":       app_id,
+        f"{channel}_INSTAGRAM_APP_SECRET":   app_secret,
+        f"{channel}_INSTAGRAM_ACCESS_TOKEN": long_lived_token,
+        f"{channel}_INSTAGRAM_USER_ID":      instagram_uid,
+        "PUBLISHING_ENABLED":                "true",
+    })
     print()
-    print("=" * 60)
-    print("SUCCESS — Add these lines to your .env file:")
-    print("=" * 60)
-    print(f"INSTAGRAM_ACCESS_TOKEN={long_lived_token}")
-    print(f"INSTAGRAM_USER_ID={instagram_user_id}")
-    print("PUBLISHING_ENABLED=true")
-    print()
-    print("NOTE: Long-lived tokens expire after ~60 days. Re-run this script to renew.")
+    print("NOTE: Long-lived tokens expire after ~60 days.")
+    print("      To refresh: python setup_credentials.py --platform instagram --channel", channel.lower())
     print()
 
 
@@ -335,14 +455,22 @@ def main():
         choices=["youtube", "tiktok", "instagram"],
         help="Platform to configure.",
     )
+    parser.add_argument(
+        "--channel",
+        required=True,
+        help="Channel identifier, e.g. 'neilbound' or 'ilb'. "
+             "Credentials are stored as CHANNEL_PLATFORM_KEY in .env.",
+    )
     args = parser.parse_args()
 
+    channel = args.channel.upper()
+
     if args.platform == "youtube":
-        setup_youtube()
+        setup_youtube(channel)
     elif args.platform == "tiktok":
-        setup_tiktok()
+        setup_tiktok(channel)
     elif args.platform == "instagram":
-        setup_instagram()
+        setup_instagram(channel)
 
 
 if __name__ == "__main__":
