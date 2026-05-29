@@ -9,10 +9,11 @@ Run via Windows Task Scheduler every 15 minutes:
 Requires PUBLISHING_ENABLED=true in .env to upload anything.
 """
 
+import logging
 import os
 import sys
-import traceback
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 
 # Add project root to sys.path so pipeline/ is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +23,39 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), ov
 
 from pipeline.publish_queue import get_due, mark_complete, mark_failed
 from pipeline.publish import upload_youtube, upload_tiktok, upload_instagram
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+# The daemon runs unattended under Task Scheduler, where stdout is discarded.
+# Persist every run to a rotating log file so failures have an audit trail, while
+# still echoing to the console for manual/interactive runs.
+
+_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "output", "publisher_daemon.log"
+)
+
+
+def _setup_logging() -> logging.Logger:
+    logger = logging.getLogger("publisher_daemon")
+    if logger.handlers:  # already configured (avoid duplicate handlers on re-import)
+        return logger
+    logger.setLevel(logging.INFO)
+    fmt = logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+    fh = RotatingFileHandler(
+        _LOG_PATH, maxBytes=2_000_000, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
+
+
+log = _setup_logging()
 
 
 # ── Platform dispatch ───────────────────────────────────────────────────────────
@@ -81,25 +115,24 @@ def _upload_platform(platform: str, entry: dict) -> dict:
 
 def main():
     now = datetime.now(tz=timezone.utc)
-    print(f"[publisher_daemon] Starting at {now.isoformat()}")
+    log.info("Starting at %s", now.isoformat())
 
     publishing_enabled = os.environ.get("PUBLISHING_ENABLED", "").lower() == "true"
     if not publishing_enabled:
-        print(
-            "[publisher_daemon] PUBLISHING_ENABLED is not set to 'true'. "
-            "No uploads will be attempted.\n"
-            "To enable publishing: set PUBLISHING_ENABLED=true in .env and run "
-            "python setup_credentials.py --platform <platform> for each platform."
+        log.warning(
+            "PUBLISHING_ENABLED is not 'true' — no uploads will be attempted. "
+            "Set PUBLISHING_ENABLED=true in .env and run "
+            "setup_credentials.py --platform <platform> for each platform."
         )
         return
 
     due_posts = get_due(now=now)
 
     if not due_posts:
-        print("[publisher_daemon] No posts due. Exiting.")
+        log.info("No posts due. Exiting.")
         return
 
-    print(f"[publisher_daemon] {len(due_posts)} post(s) due for publishing.")
+    log.info("%d post(s) due for publishing.", len(due_posts))
 
     success_count = 0
     failure_count = 0
@@ -109,16 +142,16 @@ def main():
         platforms = entry.get("platforms", [])
         title     = entry.get("title", "(no title)")
 
-        print(f"\n[publisher_daemon] Processing post_id={post_id} | {title!r}")
-        print(f"  Platforms : {', '.join(platforms)}")
-        print(f"  Clip      : {entry.get('clip_path', '?')}")
-        print(f"  Scheduled : {entry.get('scheduled_time', '?')}")
+        log.info("Processing post_id=%s | %r", post_id, title)
+        log.info("  Platforms : %s", ", ".join(platforms))
+        log.info("  Clip      : %s", entry.get("clip_path", "?"))
+        log.info("  Scheduled : %s", entry.get("scheduled_time", "?"))
 
         # ── Pre-flight: verify the clip file exists and is not suspiciously small ──
         clip_path = entry.get("clip_path", "")
         if not clip_path or not os.path.exists(clip_path):
             error_msg = f"FILE NOT FOUND: {clip_path!r}"
-            print(f"  [pre-flight] FAILED — {error_msg}")
+            log.error("  [pre-flight] FAILED — %s", error_msg)
             for platform in platforms:
                 mark_failed(post_id, platform, error_msg)
             failure_count += len(platforms)
@@ -126,12 +159,12 @@ def main():
         size_mb = os.path.getsize(clip_path) / (1024 * 1024)
         if size_mb < 0.1:
             error_msg = f"FILE TOO SMALL ({size_mb:.2f} MB) — may be corrupt: {clip_path!r}"
-            print(f"  [pre-flight] FAILED — {error_msg}")
+            log.error("  [pre-flight] FAILED — %s", error_msg)
             for platform in platforms:
                 mark_failed(post_id, platform, error_msg)
             failure_count += len(platforms)
             continue
-        print(f"  [pre-flight] OK — {size_mb:.1f} MB")
+        log.info("  [pre-flight] OK — %.1f MB", size_mb)
 
         existing_results = entry.get("results", {})
 
@@ -140,27 +173,23 @@ def main():
             # Protects against duplicate posts if an entry re-enters the queue as
             # 'partial' or is manually re-armed without clearing its 'ok' results.
             if existing_results.get(platform, {}).get("status") == "ok":
-                print(f"  [{platform}] Skipped — already uploaded successfully")
+                log.info("  [%s] Skipped — already uploaded successfully", platform)
                 continue
 
-            print(f"  [{platform}] Uploading...")
+            log.info("  [%s] Uploading...", platform)
             try:
                 result = _upload_platform(platform, entry)
                 mark_complete(post_id, platform, result)
-                print(f"  [{platform}] OK — {result}")
+                log.info("  [%s] OK — %s", platform, result)
                 success_count += 1
             except Exception as exc:
                 error_msg = f"{type(exc).__name__}: {exc}"
-                print(f"  [{platform}] FAILED — {error_msg}")
-                traceback.print_exc()
+                log.exception("  [%s] FAILED — %s", platform, error_msg)
                 mark_failed(post_id, platform, error_msg)
                 failure_count += 1
                 # Continue to next platform — do not abort the whole run
 
-    print(
-        f"\n[publisher_daemon] Done. "
-        f"Successes: {success_count}  Failures: {failure_count}"
-    )
+    log.info("Done. Successes: %d  Failures: %d", success_count, failure_count)
 
 
 if __name__ == "__main__":
