@@ -795,10 +795,13 @@ def run_shorts_season(
       - Horizontal 16:9 file (no 📱 emoji) — full episode video source
       - Vertical   9:16 file (with 📱 emoji) — shorts source (auto-detected)
 
-    vertical_paths (ordered list matching the detected segments) is REQUIRED.
     Shorts run as a completely separate pipeline from the episode:
       vertical stitch → clean → transcribe → find clips → caption → export
     Video and audio both come from the vertical source — zero H/V drift.
+
+    vertical_paths defaults to the vertical counterpart of each detected segment
+    (StreamYard pairs each horizontal with a 📱 vertical). Pass an explicit list
+    only to override that ordering.
 
     Segments are auto-detected and sorted by recording timestamp.
     The first segment (intro) gets at most `intro_max_clips` shorts (default 1).
@@ -837,17 +840,6 @@ def run_shorts_season(
     if not channel:
         channel = pipeline_cfg["default_channel"]
 
-    # Shorts are sourced directly from the 9:16 vertical StreamYard files. The
-    # old horizontal-only fallback (stack_h split-crop) is gone, so vertical
-    # paths are required.
-    if not vertical_paths:
-        raise ValueError(
-            "run_shorts_season requires vertical_paths — the ordered list of 9:16 "
-            "vertical StreamYard files matching the detected segments. Shorts are "
-            "sourced directly from the vertical files (zero H/V drift, title cards "
-            "preserved); the horizontal stack_h fallback has been removed."
-        )
-
     ep_dir = episode_dir(show_name, episode_id, run_date=run_date, group=group)
     paths  = ensure_episode_dirs(ep_dir)
     status_path = paths["status"]
@@ -857,6 +849,14 @@ def run_shorts_season(
         segments_dir, intro_max_clips, default_max_clips,
         label_prefixes=pipeline_cfg["segment_label_prefixes"],
     )
+
+    # Shorts are sourced directly from the 9:16 vertical files. _detect_segments
+    # already pairs each segment with its vertical counterpart (and errors if one
+    # is missing), so derive vertical_paths from the detection by default. This
+    # avoids passing emoji-laden (📱) paths through CLI args — the reason the old
+    # one-off temp/ launcher scripts existed. An explicit list still overrides.
+    if not vertical_paths:
+        vertical_paths = [seg["vertical"] for seg in segments]
 
     write_status(status_path,
         pipeline_type="shorts_season",

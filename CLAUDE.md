@@ -94,6 +94,14 @@ Channel resolution: pipeline entry points (`run_shorts_season`, `run_broadcast`,
 - `.env` — `ANTHROPIC_API_KEY`, `DEEPGRAM_API_KEY` — never commit
 - `config.json` — persisted show profiles — never commit (gitignored)
 
+## Running a Shorts Season
+
+Call `process_shorts_season` (MCP) or `run_pipeline.py --shorts-season` with just
+`--segments-dir`. Vertical sources are auto-derived from the detected StreamYard
+pairs — no need to pass `--vertical-paths`, and no need to hand-write `temp/`
+launcher scripts to work around emoji (📱) paths in CLI args. Pass `vertical_paths`
+only to override the auto-detected ordering.
+
 ## Git
 
 - `master` is the stable base; feature work goes on named branches

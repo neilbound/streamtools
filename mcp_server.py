@@ -1010,13 +1010,15 @@ def process_shorts_season(
         export_format:        "social", "youtube", or "both". Default "both".
         filter_audio:         Apply profanity filter. Default True.
         cover_art_path:       Optional absolute path to cover art image for MP3 tags.
-        channel:              Publishing channel identifier (default "ilb").
+        channel:              Publishing channel. Empty → active profile's
+                              pipeline.default_channel.
         generate_mp3:         Also export a podcast MP3 (ID3 tagged). Default False — upload
                               the video episode directly to Spotify instead.
-        vertical_paths:       Ordered list of 9:16 vertical MP4 paths matching the
-                              auto-detected segment order. When provided, shorts run as a
-                              fully separate pipeline (vertical stitch → clean → transcribe
-                              → find clips → export) — no H/V drift, title cards preserved.
+        vertical_paths:       Optional override for the 9:16 vertical sources. By default
+                              each segment's vertical counterpart (the 📱 StreamYard file)
+                              is auto-detected, so this is rarely needed. Shorts always run
+                              as a separate vertical pipeline (stitch → clean → transcribe →
+                              find clips → export) — no H/V drift, title cards preserved.
 
     Returns:
         Status file path for polling with check_pipeline_status.
