@@ -348,7 +348,7 @@ def run_broadcast(
     skip_to_clips: bool = False,
     export_only: bool = False,
     cover_art_path: str | None = None,
-    channel: str = "neilbound",
+    channel: str = "",   # empty → resolved from active profile's pipeline.default_channel
     generate_mp3: bool = False,
 ) -> str:
     """
@@ -380,6 +380,10 @@ def run_broadcast(
     producer_context = _config_module.active_context(cfg)
     brand  = _config_module.active_brand(cfg)
     style  = _config_module.active_style(cfg)
+
+    # Resolve channel from config when the caller didn't specify one
+    if not channel:
+        channel = _config_module.active_pipeline(cfg)["default_channel"]
 
     ep_dir = episode_dir(show_name, episode_id, run_date=run_date)
     paths  = ensure_episode_dirs(ep_dir)
@@ -669,6 +673,7 @@ def _detect_segments(
     segments_dir: str,
     intro_max_clips: int = 1,
     default_max_clips: int = 3,
+    label_prefixes: list[str] | None = None,
 ) -> list[dict]:
     """
     Scan a directory for StreamYard dual-output segment pairs.
@@ -683,8 +688,16 @@ def _detect_segments(
     The first segment in recording order is treated as the intro and
     gets intro_max_clips; all others get default_max_clips.
 
+    label_prefixes: ordered list of filename prefixes to strip when building the
+                    clean segment label (e.g. "Age Of Attraction - Season 1 - ").
+                    Configured per-show via the profile's pipeline settings. The
+                    list is checked longest-first so the most specific match wins.
+
     Raises ValueError if any horizontal file has no matching vertical.
     """
+    # Strip the most specific (longest) prefix first to avoid a short prefix
+    # shadowing a longer one (e.g. "Show - " vs "Show - Season 1 - ").
+    prefixes = sorted(label_prefixes or [], key=len, reverse=True)
     import subprocess as _sp
 
     FFPROBE = os.path.join(
@@ -729,9 +742,8 @@ def _detect_segments(
             ct = ""
 
         label = hf.replace(".mp4", "")
-        # Strip common show prefix patterns for a cleaner label
-        for prefix in ["Age Of Attraction - Season 1 - ", "Age of Attraction - Season 1 - ",
-                       "Age Of Attraction - ", "Age of Attraction - "]:
+        # Strip configured show prefixes for a cleaner label (longest match first)
+        for prefix in prefixes:
             if label.startswith(prefix):
                 label = label[len(prefix):]
                 break
@@ -770,7 +782,7 @@ def run_shorts_season(
     run_date: str = "",
     export_only: bool = False,
     cover_art_path: str | None = None,
-    channel: str = "ilb",
+    channel: str = "",   # empty → resolved from active profile's pipeline.default_channel
     generate_mp3: bool = False,
     vertical_paths: list[str] | None = None,
     chyron_suffix: str = "",
@@ -823,15 +835,23 @@ def run_shorts_season(
     if not episode_title:
         episode_title = episode_id
     producer_context = _config_module.active_context(cfg)
-    brand  = _config_module.active_brand(cfg)
-    style  = _config_module.active_style(cfg)
+    brand    = _config_module.active_brand(cfg)
+    style    = _config_module.active_style(cfg)
+    pipeline_cfg = _config_module.active_pipeline(cfg)
+
+    # Resolve channel from config when the caller didn't specify one
+    if not channel:
+        channel = pipeline_cfg["default_channel"]
 
     ep_dir = episode_dir(show_name, episode_id, run_date=run_date, group=group)
     paths  = ensure_episode_dirs(ep_dir)
     status_path = paths["status"]
 
-    # Auto-detect segment pairs
-    segments = _detect_segments(segments_dir, intro_max_clips, default_max_clips)
+    # Auto-detect segment pairs (label prefixes are per-show, from config)
+    segments = _detect_segments(
+        segments_dir, intro_max_clips, default_max_clips,
+        label_prefixes=pipeline_cfg["segment_label_prefixes"],
+    )
 
     write_status(status_path,
         pipeline_type="shorts_season",
@@ -1453,8 +1473,9 @@ if __name__ == "__main__":
                         help="Producer notes / themes to guide Claude descriptions")
     parser.add_argument("--cover-art",      default="",
                         help="Path to cover art image for podcast MP3 ID3 APIC tag")
-    parser.add_argument("--channel",        default="neilbound",
-                        help="Publishing channel, e.g. 'neilbound' or 'ilb' (default: neilbound)")
+    parser.add_argument("--channel",        default="",
+                        help="Publishing channel, e.g. 'neilbound' or 'ilb'. "
+                             "Empty → use the active profile's pipeline.default_channel.")
     parser.add_argument("--generate-mp3",   action="store_true",
                         help="Generate a podcast MP3 in addition to the video episode (off by default — upload video to Spotify directly)")
 
