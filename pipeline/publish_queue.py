@@ -285,6 +285,88 @@ def get_due(now: Optional[datetime] = None) -> list[dict]:
     return due
 
 
+# Automatic-retry policy for failed/partial uploads.
+DEFAULT_MAX_ATTEMPTS = 4      # give up after this many daemon rounds
+RETRY_BASE_MINUTES   = 30     # backoff = base * 2**(attempts-1): 30, 60, 120 min
+
+
+def _entry_has_unfinished_platform(entry: dict) -> bool:
+    """True if any of the entry's target platforms is not yet uploaded ('ok')."""
+    results = entry.get("results", {})
+    return any(
+        results.get(p, {}).get("status") != "ok"
+        for p in entry.get("platforms", [])
+    )
+
+
+def get_retryable(now: Optional[datetime] = None,
+                  max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> list[dict]:
+    """
+    Return failed/partial entries eligible for an automatic retry.
+
+    An entry is retryable when it still has a platform that hasn't succeeded,
+    has not exhausted its attempt budget, and whose next_retry_at (if set) is
+    at or before `now`. The daemon processes these alongside freshly-due posts;
+    the per-platform idempotency guard ensures only the failed platforms retry.
+    """
+    now = now or _now_utc()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    queue = _load()
+    out = []
+    for entry in queue:
+        if entry.get("status") not in ("failed", "partial"):
+            continue
+        if not _entry_has_unfinished_platform(entry):
+            continue
+        if entry.get("attempts", 0) >= max_attempts:
+            continue  # attempt budget exhausted — left for manual retry_failed
+        nra = entry.get("next_retry_at")
+        if nra:
+            try:
+                t = datetime.fromisoformat(nra)
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                if t > now:
+                    continue  # still in backoff window
+            except (TypeError, ValueError):
+                pass
+        out.append(entry)
+    return out
+
+
+def schedule_retry(post_id: str,
+                   max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+                   base_minutes: int = RETRY_BASE_MINUTES) -> tuple[bool, int]:
+    """
+    Record a failed/partial processing round and schedule the next retry.
+
+    Increments the entry's attempt counter and sets next_retry_at using
+    exponential backoff. Returns (will_retry_again, attempts). When the attempt
+    budget is exhausted, next_retry_at is cleared and will_retry_again is False
+    (the entry stays failed/partial for manual handling).
+
+    Call this once per entry after a daemon round that left platforms unfinished.
+    """
+    with _queue_lock():
+        queue = _load()
+        for entry in queue:
+            if entry["post_id"] != post_id:
+                continue
+            attempts = entry.get("attempts", 0) + 1
+            entry["attempts"] = attempts
+            if attempts >= max_attempts:
+                entry["next_retry_at"] = None
+                _save(queue)
+                return False, attempts
+            delay = base_minutes * (2 ** (attempts - 1))
+            entry["next_retry_at"] = (_now_utc() + timedelta(minutes=delay)).isoformat()
+            _save(queue)
+            return True, attempts
+    return False, 0
+
+
 def mark_complete(post_id: str, platform: str, result: dict) -> None:
     """
     Record a successful upload result for a specific platform.

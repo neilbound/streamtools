@@ -21,7 +21,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
-from pipeline.publish_queue import get_due, mark_complete, mark_failed
+from pipeline.publish_queue import (
+    get_due,
+    get_retryable,
+    mark_complete,
+    mark_failed,
+    schedule_retry,
+)
 from pipeline.publish import upload_youtube, upload_tiktok, upload_instagram
 
 
@@ -126,18 +132,22 @@ def main():
         )
         return
 
-    due_posts = get_due(now=now)
+    # Freshly-due (pending) posts + failed/partial posts eligible for auto-retry.
+    # The two lists are disjoint by status, so concatenation needs no dedupe.
+    due_posts   = get_due(now=now)
+    retry_posts = get_retryable(now=now)
 
-    if not due_posts:
+    if not due_posts and not retry_posts:
         log.info("No posts due. Exiting.")
         return
 
-    log.info("%d post(s) due for publishing.", len(due_posts))
+    log.info("%d due, %d retryable post(s) for publishing.",
+             len(due_posts), len(retry_posts))
 
     success_count = 0
     failure_count = 0
 
-    for entry in due_posts:
+    for entry in due_posts + retry_posts:
         post_id   = entry["post_id"]
         platforms = entry.get("platforms", [])
         title     = entry.get("title", "(no title)")
@@ -167,6 +177,7 @@ def main():
         log.info("  [pre-flight] OK — %.1f MB", size_mb)
 
         existing_results = entry.get("results", {})
+        round_finished = True   # all target platforms ended 'ok' this round
 
         for platform in platforms:
             # Idempotency guard: never re-upload a platform that already succeeded.
@@ -187,7 +198,18 @@ def main():
                 log.exception("  [%s] FAILED — %s", platform, error_msg)
                 mark_failed(post_id, platform, error_msg)
                 failure_count += 1
+                round_finished = False
                 # Continue to next platform — do not abort the whole run
+
+        # If the entry still has unfinished platforms, schedule an automatic
+        # retry with exponential backoff (until the attempt budget is spent).
+        if not round_finished:
+            will_retry, attempts = schedule_retry(post_id)
+            if will_retry:
+                log.info("  [retry] attempt %d failed — will auto-retry with backoff", attempts)
+            else:
+                log.warning("  [retry] attempt budget exhausted after %d tries — "
+                            "left for manual retry_failed", attempts)
 
     log.info("Done. Successes: %d  Failures: %d", success_count, failure_count)
 
