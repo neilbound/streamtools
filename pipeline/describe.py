@@ -13,6 +13,7 @@ Functions:
 
 import os
 import json
+import time
 
 import anthropic
 from dotenv import load_dotenv
@@ -61,14 +62,21 @@ def _episode_system_prompt(brand: dict) -> str:
     signature = build_signature_block(brand)
     return f"""You are the content writer for {show}. You write compelling, emotionally intelligent episode descriptions that match the show's voice: warm but direct, culturally aware, and never over-produced.
 
+VOICE AND STYLE RULES — follow these without exception:
+- No emojis in any body copy, titles, or bullet points. The signature block platform links are the only exception.
+- No exclamation points. If something is worth saying, the words carry it.
+- No AI-typical phrases: "dive deep", "unpack", "masterclass", "game-changer", "it's clear that", "join us as", "in this episode we explore".
+- No hype language or hollow enthusiasm. Specific and direct beats vague and warm.
+- Write like a sharp human, not a content calendar.
+
 Your output must follow this EXACT structure — no deviations, no extra sections:
 
 ---
 1. THE HOOK TITLE TRIO
 Three title variants for different audiences:
-☕ The Tea:        (provocative/gossipy angle)
-🛋️ The Therapy Session: (emotional/introspective angle)
-💬 The Personal:   (first-person/relatable angle)
+The Tea:           (provocative/gossipy angle)
+The Therapy Session: (emotional/introspective angle)
+The Personal:      (first-person/relatable angle)
 
 2. THE DESCRIPTION
 The Hook:
@@ -78,15 +86,15 @@ The Deep Dive:
 [2 rich paragraphs expanding on both hosts' perspectives. Name the hosts specifically. Capture the emotional texture — what they said AND what it meant. Do not summarise blandly.]
 
 The Highlights — Must-Hear Moments:
-[4-5 bullet points with emoji icons. Each bullet = a memorable, specific moment. Format: emoji "quoted pull-quote or vivid description" — 1 sentence of context.]
+[4-5 bullet points. Each bullet = a memorable, specific moment from the episode — a direct quote or a vivid, specific description of what happened — followed by one sentence of context. No emojis.]
 
 3. THE STANDARD SIGNATURE BLOCK
 {signature}
 
-Have a dating story or a question for our next therapy-inspired deep dive? Drop it in the comments below!
+Have a dating story or a question for the next episode? Drop it in the comments below.
 ---
 
-Tone: Conversational but thoughtful. Emotionally specific. Never corporate. Use em dashes, italics energy, and the hosts' actual names."""
+Tone: Conversational but thoughtful. Emotionally specific. Never corporate. Use em dashes and the hosts' actual names."""
 
 
 def _shorts_system_prompt(brand: dict) -> str:
@@ -98,14 +106,29 @@ def _shorts_system_prompt(brand: dict) -> str:
         tiktok = f"@{tiktok}"
 
     follow_line = " | ".join(filter(None, [
-        f"Full ep on YouTube 👉 {youtube_url}" if youtube_url else "",
+        f"Full ep on YouTube: {youtube_url}" if youtube_url else "",
         f"Instagram: {instagram}" if instagram else "",
         f"TikTok: {tiktok}" if tiktok else "",
     ]))
 
     return f"""You are the content writer for {show}. Write short-form social media copy for a podcast clip.
 
-You will receive the clip transcript and episode context. Generate THREE pieces of copy:
+You will receive the clip transcript and episode context. Generate THREE pieces of copy.
+
+VOICE AND STYLE RULES — follow these without exception:
+- No emojis anywhere. None. Not in hashtags, not in captions, not in follow lines.
+- No exclamation points. If something is worth saying, the words carry it.
+- No markdown formatting. No asterisks (**), no underscores for emphasis, no bold, no italics. Plain text only.
+- No AI-typical phrases: "dive deep", "unpack", "masterclass", "game-changer", "it's clear that", "let's explore", "in today's episode".
+- No hype or performative enthusiasm. Direct, confident, and specific.
+- Write like a sharp human, not a content calendar.
+- Questions to drive comments should feel like genuine curiosity, not a CTA template.
+
+CONTENT RULES — non-negotiable:
+- Every description MUST be written specifically about what is said in THIS clip transcript.
+- Do not write a generic episode summary. A reader who has only seen the clip title and watched the clip should recognize the description as being exactly about that moment.
+- If the clip is about a specific topic (e.g. celibacy, age gap math, a particular person's behavior), the description must reference that topic directly with specific detail from the transcript.
+- Never recycle or reuse copy from other clips. Each description is unique to this clip.
 
 ---
 YOUTUBE_SHORT:
@@ -115,10 +138,40 @@ TIKTOK:
 [Single punchy caption under 150 chars. Conversational, curiosity-driven. Include 3-5 hashtags.]
 
 INSTAGRAM:
-[Caption with an engaging opening line, 2-3 sentences of context, a question to drive comments, then 8-12 relevant hashtags on a new line. End with "Link in bio for the full episode."]
+[Caption with an engaging opening line, 2-3 sentences of context, a question to drive comments, then 8-12 relevant hashtags on a new line. End with "Full episode on YouTube — link in bio."]
 ---
 
-Output ONLY the three labelled blocks above. No intro, no commentary."""
+Output ONLY the three labelled blocks above. No intro, no commentary. No markdown. Plain text only."""
+
+
+# ── API call helper ────────────────────────────────────────────────────────────
+
+def _call_with_retry(client, *, model: str, max_tokens: int, system: str, messages: list, max_attempts: int = 3) -> str:
+    """
+    Call client.messages.create() with exponential backoff retry.
+
+    Retries on transient API errors (overload 529, network timeouts, etc.).
+    Raises RuntimeError if all attempts fail.
+
+    Returns:
+        The text content of the first content block as a stripped string.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            message = client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=messages,
+            )
+            return message.content[0].text.strip()
+        except Exception as exc:
+            last_error = exc
+            print(f"[describe] Attempt {attempt}/{max_attempts}: API error — {type(exc).__name__}: {exc}")
+            if attempt < max_attempts:
+                time.sleep(2 ** (attempt - 1))  # 1s, 2s
+    raise RuntimeError(f"[describe] All {max_attempts} Claude API attempts failed. Last error: {last_error}")
 
 
 # ── Main generator functions ───────────────────────────────────────────────────
@@ -172,14 +225,13 @@ Full transcript:
 
 Write the complete description package for this episode."""
 
-    message = client.messages.create(
+    full_text = _call_with_retry(
+        client,
         model="claude-opus-4-6",
         max_tokens=2048,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
     )
-
-    full_text = message.content[0].text.strip()
 
     # Extract the three title options from the trio section
     title_options = _extract_title_options(full_text)
@@ -221,6 +273,13 @@ def generate_clip_descriptions(
     if brand is None:
         brand = {}
 
+    # Sanity check — very short transcripts produce generic descriptions
+    if len(clip_words) < 20:
+        print(
+            f"[describe] WARNING: clip_words has only {len(clip_words)} words for {clip_title!r} — "
+            f"descriptions may be vague or off-topic. Consider re-checking clip boundaries."
+        )
+
     client = anthropic.Anthropic(api_key=api_key)
     system = _shorts_system_prompt(brand)
 
@@ -234,29 +293,58 @@ Clip transcript:
 
 Write the YouTube Short, TikTok, and Instagram descriptions for this clip."""
 
-    message = client.messages.create(
+    raw = _call_with_retry(
+        client,
         model="claude-opus-4-6",
-        max_tokens=600,
+        max_tokens=1000,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
     )
-
-    raw = message.content[0].text.strip()
     return _parse_shorts_output(raw)
 
 
 # ── Output parsers ─────────────────────────────────────────────────────────────
 
+def _strip_markdown(text: str) -> str:
+    """
+    Remove markdown formatting artifacts from generated copy.
+    Strips ** bold markers, * italic markers, and leading/trailing
+    lines that consist only of markdown syntax.
+    """
+    import re
+    # Remove lines that are only ** or * (common Claude artifact)
+    lines = text.split("\n")
+    lines = [l for l in lines if l.strip() not in ("**", "*", "***")]
+    text = "\n".join(lines)
+    # Strip **text** bold markers → text
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
+    # Strip *text* italic markers → text
+    text = re.sub(r"\*(.+?)\*", r"\1", text, flags=re.DOTALL)
+    # Strip leading/trailing ** on a line
+    text = re.sub(r"^\*+\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\s*\*+$", "", text, flags=re.MULTILINE)
+    return text.strip()
+
+
 def _extract_title_options(description_text: str) -> list[str]:
     """Pull the three hook title lines from a generated episode description."""
     titles = []
-    markers = ["☕ The Tea:", "🛋️ The Therapy Session:", "💬 The Personal:"]
-    for marker in markers:
-        if marker in description_text:
-            after = description_text.split(marker, 1)[1]
-            line = after.split("\n")[0].strip().strip('"')
-            if line:
-                titles.append(line)
+    # Support both plain and emoji-prefixed markers
+    marker_sets = [
+        ["The Tea:", "The Therapy Session:", "The Personal:"],
+        ["☕ The Tea:", "🛋️ The Therapy Session:", "💬 The Personal:"],
+    ]
+    for markers in marker_sets:
+        found = []
+        for marker in markers:
+            if marker in description_text:
+                after = description_text.split(marker, 1)[1]
+                line = after.split("\n")[0].strip().strip('"')
+                line = _strip_markdown(line)
+                if line:
+                    found.append(line)
+        if found:
+            return found
     return titles
 
 
@@ -282,6 +370,6 @@ def _parse_shorts_output(raw: str) -> dict:
             if next_marker in after:
                 after = after.split(next_marker)[0]
                 break
-        result[key] = after.strip()
+        result[key] = _strip_markdown(after.strip())
 
     return result

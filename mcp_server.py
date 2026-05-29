@@ -2,22 +2,24 @@
 streamtools MCP server — exposes the podcast pipeline as tools for Claude Desktop Cowork.
 
 Tools:
-  get_video_info           → duration + file size
-  compose_portrait         → stack 2-4 landscape recordings into 1080x1920
-  clean_audio              → DeepFilterNet3 speech enhancement
-  transcribe_audio         → Deepgram Nova-3, saves transcript JSON, returns path
-  suggest_clips            → Claude Opus 4.6 clip suggestions from transcript
-  export_clip_social       → burned-in karaoke captions, social MP4
-  export_clip_youtube      → clean MP4 + SRT for YouTube
-  run_full_pipeline        → run complete pipeline in background, returns immediately
-  check_pipeline_status    → read progress/results from a running or completed pipeline
+  get_video_info                → duration + file size
+  compose_portrait              → stack 2-4 landscape recordings into 1080x1920
+  clean_audio                   → DeepFilterNet3 speech enhancement
+  transcribe_audio              → Deepgram Nova-3, saves transcript JSON, returns path
+  suggest_clips                 → Claude Opus 4.6 clip suggestions from transcript
+  export_clip_social            → burned-in karaoke captions, social MP4
+  export_clip_youtube           → clean MP4 + SRT for YouTube
+  run_full_pipeline             → run complete pipeline in background, returns immediately
+  process_broadcast_episode     → run StreamYard dual-output pipeline in background
+  upload_episode_to_youtube     → upload a completed full episode to YouTube
+  check_pipeline_status         → read progress/results from a running or completed pipeline
 
 Data flow: tools pass file paths. transcribe_audio saves transcript JSON to cache/;
 subsequent tools accept transcript_path to avoid putting large transcripts in context.
 
 Long-running tools (compose, clean, transcribe, export) exceed Claude Desktop's request
-timeout. Use run_full_pipeline to launch the full pipeline as a background process —
-it returns immediately with the status file path. Poll with check_pipeline_status.
+timeout. Use run_full_pipeline or process_broadcast_episode to launch in the background —
+they return immediately with the status file path. Poll with check_pipeline_status.
 """
 
 import json
@@ -450,25 +452,60 @@ def check_pipeline_status(status_path: str) -> str:
               f"Show: {status.get('show', '?')}",
               f"Started: {status.get('started', '?')}"]
 
-    steps = ["compose", "clean", "transcribe", "suggest"]
+    pipeline_type = status.get("pipeline_type", "standard")
+
+    # Step keys vary by pipeline type
+    if pipeline_type == "broadcast":
+        steps = ["compose", "clean", "transcribe", "filter",
+                 "episode_export", "episode_srt", "episode_mp3",
+                 "describe", "suggest"]
+    elif pipeline_type == "shorts_season":
+        steps = ["stitch", "clean", "transcribe", "filter",
+                 "v_stitch", "v_clean", "v_transcribe", "v_filter",
+                 "episode_export", "episode_srt", "episode_mp3", "describe"]
+    else:
+        steps = ["compose", "clean", "transcribe", "filter", "suggest"]
+
     for step in steps:
         if step in status:
             lines.append(f"  ✓ {step}: {status[step].get('message', '')}")
 
-    # Count exports
-    exported = [k for k in status if k.startswith("export_")]
-    if exported:
-        lines.append(f"  ✓ exports: {len(exported)} clip(s) done")
+    # Count clip exports
+    exported_keys = [k for k in status if k.startswith("export_") and not k.startswith("export_only")]
+    if exported_keys:
+        lines.append(f"  ✓ exports: {len(exported_keys)} clip(s) done")
+
+    # Count segment exports
+    seg_v_keys = [k for k in status if k.startswith("seg_v_")]
+    seg_h_keys = [k for k in status if k.startswith("seg_h_")]
+    if seg_v_keys or seg_h_keys:
+        lines.append(f"  ✓ segments: {len(seg_h_keys)} horizontal, {len(seg_v_keys)} vertical")
 
     if state == "complete":
         clips = status.get("exported_clips", [])
         lines.append(f"\nComplete — {len(clips)} clip(s) exported:")
         for c in clips:
             lines.append(f"  • {c['title']}")
-            for fmt in ("social", "youtube", "srt"):
+            for fmt in ("social", "youtube", "srt", "descriptions"):
                 if fmt in c:
                     lines.append(f"      {fmt}: {c[fmt]}")
-        lines.append(f"Finished: {status.get('finished', '?')}")
+
+        if pipeline_type in ("broadcast", "shorts_season"):
+            ep_status  = status.get("episode_export", {})
+            mp3_status = status.get("episode_mp3", {})
+            if ep_status.get("output"):
+                lines.append(f"\n  Full episode : {ep_status['output']}")
+            if mp3_status.get("output"):
+                lines.append(f"  Podcast MP3  : {mp3_status['output']}")
+            if pipeline_type == "shorts_season":
+                n_seg_h = len([k for k in status if k.startswith("seg_h_")])
+                n_seg_v = len([k for k in status if k.startswith("seg_v_")])
+                lines.append(f"  Segments     : {n_seg_h} horizontal, {n_seg_v} vertical")
+            spotify_url = status.get("spotify_upload_url", "")
+            if spotify_url:
+                lines.append(f"\n  ► Upload to Spotify: {spotify_url}")
+
+        lines.append(f"\nFinished: {status.get('finished', '?')}")
 
     elif state == "error":
         lines.append(f"\nERROR: {status.get('error', 'unknown error')}")
@@ -486,6 +523,7 @@ def schedule_clip(
     description: str = "",
     scheduled_time: str = "",
     tags: list[str] = [],
+    channel: str = "neilbound",
 ) -> str:
     """
     Add a clip to the publish queue for scheduled delivery to social platforms.
@@ -501,6 +539,7 @@ def schedule_clip(
         scheduled_time: ISO 8601 UTC datetime string, e.g. "2026-05-16T15:00:00+00:00".
                         If empty, schedules for now (uploaded at next daemon run).
         tags:           Optional hashtag strings (without '#').
+        channel:        Publishing channel: "neilbound" or "ilb". Default "neilbound".
 
     Returns:
         Confirmation message with the assigned post_id.
@@ -518,6 +557,7 @@ def schedule_clip(
         description=description,
         scheduled_time_iso=scheduled_time,
         tags=tags or [],
+        channel=channel,
     )
 
     return (
@@ -538,6 +578,7 @@ def publish_clip_now(
     title: str,
     description: str = "",
     tags: list[str] = [],
+    channel: str = "neilbound",
 ) -> str:
     """
     Upload and publish a clip immediately to one or more social platforms.
@@ -552,6 +593,7 @@ def publish_clip_now(
         title:       Post title / caption.
         description: Longer description (used by YouTube; optional for others).
         tags:        Optional hashtag strings (without '#').
+        channel:     Publishing channel: "neilbound" or "ilb". Default "neilbound".
 
     Returns:
         Per-platform results (video IDs, URLs, publish IDs).
@@ -560,9 +602,9 @@ def publish_clip_now(
     import traceback as _tb
 
     uploaders = {
-        "youtube":   lambda: upload_youtube(clip_path, title, description, tags or []),
-        "tiktok":    lambda: upload_tiktok(clip_path, title, tags or []),
-        "instagram": lambda: upload_instagram(clip_path, title),
+        "youtube":   lambda: upload_youtube(clip_path, title, description, tags or [], channel=channel),
+        "tiktok":    lambda: upload_tiktok(clip_path, title, tags or [], channel=channel),
+        "instagram": lambda: upload_instagram(clip_path, title, channel=channel),
     }
 
     lines = [f"Publishing '{title}' to {len(platforms)} platform(s)...\n"]
@@ -648,6 +690,42 @@ def cancel_scheduled_clip(post_id: str) -> str:
             "Either the post_id was not found, or the post is not in 'pending' status. "
             "Use list_scheduled_clips to check the current status."
         )
+
+
+@mcp.tool()
+def retry_failed_clip(post_id: str) -> str:
+    """
+    Re-arm a partial or failed post so the daemon retries ONLY the platforms that
+    have not yet succeeded.
+
+    Use this instead of manually resetting a post — it preserves the results of
+    platforms that already uploaded, so they are never posted twice. The entry is
+    set back to 'pending'; the next daemon run (or publish_clip_now) will attempt
+    only the failed/missing platforms.
+
+    Args:
+        post_id: The 8-character post identifier (from list_scheduled_clips).
+
+    Returns:
+        Confirmation listing which platforms will be retried, or an explanation
+        if there was nothing to retry.
+    """
+    from pipeline.publish_queue import retry_failed
+
+    success, to_retry = retry_failed(post_id)
+
+    if success:
+        return (
+            f"Post {post_id} re-armed for retry.\n"
+            f"Platforms to retry : {', '.join(to_retry)}\n"
+            f"Already-successful platforms are preserved and will NOT be re-uploaded.\n"
+            f"The daemon will process this at its next run."
+        )
+    return (
+        f"Nothing to retry for post {post_id}. "
+        "Either the post_id was not found, or every platform already succeeded. "
+        "Use list_scheduled_clips to check the current status."
+    )
 
 
 # ── Description generation tools ──────────────────────────────────────────────
@@ -753,6 +831,720 @@ def generate_clip_descriptions(
         f"── TIKTOK ──\n{result['tiktok']}\n\n"
         f"── INSTAGRAM REELS ──\n{result['instagram']}"
     )
+
+
+# ── Broadcast pipeline tools ──────────────────────────────────────────────────
+
+@mcp.tool()
+def process_broadcast_episode(
+    episode_id: str,
+    horizontal_path: str,
+    vertical_path: str,
+    episode_title: str = "",
+    episode_notes: str = "",
+    show_name: str = "",
+    local_recordings: list[str] = [],
+    min_clip: int = 45,
+    max_clip: int = 50,
+    export_format: str = "both",
+    filter_audio: bool = True,
+    cover_art_path: str = "",
+    channel: str = "neilbound",
+    generate_mp3: bool = False,
+) -> str:
+    """
+    Run the StreamYard dual-output broadcast pipeline in the background.
+
+    Takes the 16:9 horizontal episode and the 9:16 vertical shorts source from the
+    same StreamYard session. Both carry the same mixed audio — cleaned once and
+    reused for all outputs.
+
+    Produces in output/{show}_{episode_id}_{date}/:
+      episode/{slug}_youtube.mp4      — full 16:9 episode for YouTube
+      episode/{slug}.srt              — full episode captions
+      episode/{slug}.mp3              — podcast MP3 (ID3 tagged, upload to Spotify manually)
+      episode/{slug}_description.txt  — Claude YouTube description
+      episode/{slug}_shownotes.txt    — Claude show notes for Spotify
+      clips/{slug}_social.mp4         — 9:16 with karaoke captions (from vertical source)
+      clips/{slug}_youtube.mp4        — 9:16 clean (from vertical source)
+      clips/{slug}_descriptions.json  — YouTube Short / TikTok / Instagram captions
+
+    Args:
+        episode_id:        Short episode label, e.g. "s11e01" or "manosphere_pt2".
+        horizontal_path:   Absolute path to the 16:9 StreamYard horizontal download.
+        vertical_path:     Absolute path to the 9:16 StreamYard vertical download.
+        episode_title:     Full episode title for descriptions and ID3 tags.
+        episode_notes:     Producer notes to guide Claude description generation.
+        show_name:         Show name for directory naming. Defaults to active profile.
+        local_recordings:  Optional list of per-participant local recording paths to compose
+                           a higher-quality episode (replaces horizontal_path as video source).
+        min_clip:          Minimum clip duration in seconds. Default 45.
+        max_clip:          Maximum clip duration in seconds. Default 50.
+        export_format:     "social", "youtube", or "both". Default "both".
+        filter_audio:      Apply profanity filter to audio and captions. Default True.
+        cover_art_path:    Optional absolute path to cover art image for podcast MP3.
+        channel:           Publishing channel identifier, e.g. "neilbound" or "ilb".
+                           Must match credentials set up via setup_credentials.py --channel.
+                           Default "neilbound".
+        generate_mp3:      Also export a podcast MP3 (ID3 tagged). Default False — upload
+                           the video episode directly to Spotify instead.
+
+    Returns:
+        Status file path for polling with check_pipeline_status.
+        Includes a reminder to upload the episode video to Spotify manually.
+    """
+    python_exe = os.path.join(os.path.dirname(__file__), ".venv312", "Scripts", "python.exe")
+    script     = os.path.join(os.path.dirname(__file__), "run_pipeline.py")
+
+    cmd = [python_exe, script,
+           "--broadcast",
+           "--episode", episode_id,
+           "--horizontal", horizontal_path,
+           "--vertical",   vertical_path]
+    if episode_title:
+        cmd += ["--episode-title", episode_title]
+    if episode_notes:
+        cmd += ["--episode-notes", episode_notes]
+    if show_name:
+        cmd += ["--show", show_name]
+    if local_recordings:
+        cmd += ["--local-recordings"] + list(local_recordings)
+    cmd += ["--min-clip", str(min_clip), "--max-clip", str(max_clip)]
+    cmd += ["--format", export_format]
+    if not filter_audio:
+        cmd.append("--no-filter")
+    if cover_art_path:
+        cmd += ["--cover-art", cover_art_path]
+    cmd += ["--channel", channel]
+    if generate_mp3:
+        cmd.append("--generate-mp3")
+
+    subprocess.Popen(
+        cmd,
+        cwd=os.path.dirname(__file__),
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+
+    from pipeline.episode import episode_dir as _ep_dir
+    import config as _cfg
+    cfg = _cfg.load()
+    sn  = show_name or cfg.get("active_profile", "podcast")
+    ep  = _ep_dir(sn, episode_id)
+    status_path = os.path.join(ep, "pipeline_status.json")
+
+    return (
+        f"Broadcast pipeline started in background.\n"
+        f"Episode  : {episode_id}\n"
+        f"Title    : {episode_title or episode_id}\n"
+        f"Output   : {ep}\n"
+        f"Status   : {status_path}\n\n"
+        f"Use check_pipeline_status to monitor progress.\n\n"
+        f"NOTE: When complete, upload the episode video to Spotify manually:\n"
+        f"  https://podcasters.spotify.com/pod/dashboard/episodes/new"
+    )
+
+
+@mcp.tool()
+def process_shorts_season(
+    episode_id: str,
+    segments_dir: str,
+    episode_title: str = "",
+    episode_notes: str = "",
+    show_name: str = "",
+    group: str = "",
+    intro_max_clips: int = 1,
+    default_max_clips: int = 3,
+    min_clip: int = 30,
+    max_clip: int = 55,
+    export_format: str = "both",
+    filter_audio: bool = True,
+    cover_art_path: str = "",
+    channel: str = "ilb",
+    generate_mp3: bool = False,
+    vertical_paths: list[str] | None = None,
+    chyron_suffix: str = "",
+) -> str:
+    """
+    Run the shorts-season pipeline in the background.
+
+    A shorts season consists of multiple independently recorded segments
+    (intro, overall impressions, per-couple or per-topic segments) that are:
+      1. Stitched into a single full episode (YouTube + Spotify MP3)
+      2. Individually mined for social shorts
+
+    Expects `segments_dir` to contain StreamYard dual-output pairs:
+      - Horizontal 16:9 (no 📱 emoji) — used for the full episode video
+      - Vertical   9:16 (with 📱 emoji) — used as the shorts source
+
+    Segments are auto-detected and sorted by recording timestamp.
+    The first (intro) segment gets `intro_max_clips` shorts; all others
+    get `default_max_clips` each. Shorts are never forced — if a segment
+    doesn't have enough natural clip material, fewer are generated.
+
+    Produces in output/{group}/{show}_{episode_id}_{date}/:
+      episode/{slug}_youtube.mp4              — full 16:9 episode for YouTube
+      episode/{slug}.srt / .mp3 / _description.txt / _shownotes.txt
+      clips/{seg}__{clip}_social.mp4          — 9:16 with karaoke captions
+      clips/{seg}__{clip}_youtube.mp4         — 9:16 clean (vertical source)
+      clips/{seg}__{clip}.srt / _descriptions.json
+      segments/{seg_slug}_youtube.mp4         — full segment, vertical 9:16
+      segments/{seg_slug}.srt
+      segments/{seg_slug}_horizontal_youtube.mp4  — full segment, horizontal 16:9
+      segments/{seg_slug}_horizontal.srt
+      segment_manifest.json
+
+    Args:
+        episode_id:           Short label, e.g. "aoa_s1" or "age_of_attraction_s1".
+        segments_dir:         Absolute path to the directory containing segment pairs.
+        episode_title:        Full episode title for descriptions and ID3 tags.
+        episode_notes:        Producer notes to guide Claude descriptions.
+        show_name:            Show name for directory naming. Defaults to active profile.
+        group:                Output folder group (e.g. "age_of_attraction_s1").
+                              Creates output/{group}/{show}_{id}_{date}/ instead of
+                              the flat output/{show}_{id}_{date}/.
+        intro_max_clips:      Max clips extracted from the intro segment. Default 1.
+        default_max_clips:    Max clips extracted from each non-intro segment. Default 3.
+        min_clip:             Min clip duration in seconds. Default 30.
+        max_clip:             Max clip duration in seconds. Default 55.
+        export_format:        "social", "youtube", or "both". Default "both".
+        filter_audio:         Apply profanity filter. Default True.
+        cover_art_path:       Optional absolute path to cover art image for MP3 tags.
+        channel:              Publishing channel identifier (default "ilb").
+        generate_mp3:         Also export a podcast MP3 (ID3 tagged). Default False — upload
+                              the video episode directly to Spotify instead.
+        vertical_paths:       Ordered list of 9:16 vertical MP4 paths matching the
+                              auto-detected segment order. When provided, shorts run as a
+                              fully separate pipeline (vertical stitch → clean → transcribe
+                              → find clips → export) — no H/V drift, title cards preserved.
+
+    Returns:
+        Status file path for polling with check_pipeline_status.
+    """
+    python_exe = os.path.join(os.path.dirname(__file__), ".venv312", "Scripts", "python.exe")
+    script     = os.path.join(os.path.dirname(__file__), "run_pipeline.py")
+
+    cmd = [python_exe, script,
+           "--shorts-season",
+           "--episode",      episode_id,
+           "--segments-dir", segments_dir]
+    if episode_title:
+        cmd += ["--episode-title", episode_title]
+    if episode_notes:
+        cmd += ["--episode-notes", episode_notes]
+    if show_name:
+        cmd += ["--show", show_name]
+    if group:
+        cmd += ["--group", group]
+    cmd += ["--intro-max-clips",   str(intro_max_clips)]
+    cmd += ["--default-max-clips", str(default_max_clips)]
+    cmd += ["--min-clip", str(min_clip), "--max-clip", str(max_clip)]
+    cmd += ["--format", export_format]
+    if not filter_audio:
+        cmd.append("--no-filter")
+    if cover_art_path:
+        cmd += ["--cover-art", cover_art_path]
+    cmd += ["--channel", channel]
+    if generate_mp3:
+        cmd.append("--generate-mp3")
+    if vertical_paths:
+        cmd += ["--vertical-paths", json.dumps(vertical_paths)]
+    if chyron_suffix:
+        cmd += ["--chyron-suffix", chyron_suffix]
+
+    subprocess.Popen(
+        cmd,
+        cwd=os.path.dirname(__file__),
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
+
+    from pipeline.episode import episode_dir as _ep_dir
+    import config as _cfg
+    cfg = _cfg.load()
+    sn  = show_name or cfg.get("active_profile", "podcast")
+    ep  = _ep_dir(sn, episode_id, group=group)
+    status_path = os.path.join(ep, "pipeline_status.json")
+
+    return (
+        f"Shorts season pipeline started in background.\n"
+        f"Episode  : {episode_id}\n"
+        f"Title    : {episode_title or episode_id}\n"
+        f"Group    : {group or '(none)'}\n"
+        f"Segments : {segments_dir}\n"
+        f"Output   : {ep}\n"
+        f"Status   : {status_path}\n\n"
+        f"Use check_pipeline_status to monitor progress.\n\n"
+        f"NOTE: When complete, upload the episode video to Spotify manually:\n"
+        f"  https://podcasters.spotify.com/pod/dashboard/episodes/new"
+    )
+
+
+@mcp.tool()
+def upload_episode_to_youtube(
+    episode_dir_path: str,
+    title: str,
+    scheduled_time: str = "",
+    category_id: str = "22",
+    thumbnail_path: str = "",
+    channel: str = "neilbound",
+) -> str:
+    """
+    Upload a completed full episode to YouTube from the episode output directory.
+
+    Reads the pipeline_status.json to verify the pipeline is complete, then locates
+    the *_youtube.mp4, *.srt, and *_description.txt files automatically.
+
+    Requires PUBLISHING_ENABLED=true and YOUTUBE_* credentials in .env.
+    Run: python setup_credentials.py --platform youtube --channel <channel>
+
+    Args:
+        episode_dir_path: Path to the episode root directory (returned by check_pipeline_status
+                          or process_broadcast_episode), e.g.
+                          "C:/path/output/is_love_blind_s11e01_2026-05-18".
+        title:            YouTube video title (max 100 chars).
+        scheduled_time:   ISO 8601 UTC string for scheduled publish, e.g.
+                          "2026-05-20T15:00:00+00:00". If empty, publishes immediately.
+        category_id:      YouTube category ID. Default "22" (People & Blogs).
+        thumbnail_path:   Optional absolute path to a thumbnail image (JPEG/PNG).
+        channel:          Publishing channel: "neilbound" or "ilb". Default "neilbound".
+
+    Returns:
+        YouTube video URL and upload details.
+    """
+    import glob as _glob
+
+    status_path = os.path.join(episode_dir_path, "pipeline_status.json")
+    if not os.path.exists(status_path):
+        return f"pipeline_status.json not found in {episode_dir_path}. Has the pipeline run?"
+
+    from pipeline.episode import read_status
+    status = read_status(status_path)
+
+    if status.get("state") != "complete":
+        return (
+            f"Pipeline state is '{status.get('state', 'unknown')}' — must be 'complete' before uploading.\n"
+            f"Use check_pipeline_status to see current progress."
+        )
+
+    if status.get("pipeline_type") != "broadcast":
+        return (
+            "upload_episode_to_youtube is for broadcast pipeline episodes only.\n"
+            "Use publish_clip_now or schedule_clip for short clips."
+        )
+
+    ep_subdir = os.path.join(episode_dir_path, "episode")
+
+    # Locate video
+    video_matches = _glob.glob(os.path.join(ep_subdir, "*_youtube.mp4"))
+    if not video_matches:
+        return f"No *_youtube.mp4 found in {ep_subdir}. Check that episode_export step completed."
+    video_path = video_matches[0]
+
+    # Locate SRT (non-fatal if missing)
+    srt_matches = _glob.glob(os.path.join(ep_subdir, "*.srt"))
+    srt_path = srt_matches[0] if srt_matches else None
+
+    # Locate description (non-fatal if missing)
+    desc_matches = _glob.glob(os.path.join(ep_subdir, "*_description.txt"))
+    description = ""
+    if desc_matches:
+        with open(desc_matches[0], "r", encoding="utf-8") as f:
+            description = f.read()
+
+    from pipeline.publish import upload_youtube_episode
+
+    try:
+        result = upload_youtube_episode(
+            video_path=video_path,
+            title=title,
+            description=description,
+            scheduled_time=scheduled_time or None,
+            category_id=category_id,
+            srt_path=srt_path,
+            thumbnail_path=thumbnail_path or None,
+            channel=channel,
+        )
+        lines = [
+            f"Episode uploaded to YouTube.",
+            f"  URL       : {result['url']}",
+            f"  Video ID  : {result['video_id']}",
+            f"  Scheduled : {result['scheduled']}",
+            f"  Captions  : {'uploaded' if result['captions_uploaded'] else 'not uploaded (check manually)'}",
+        ]
+        if srt_path:
+            lines.append(f"  SRT file  : {srt_path}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Upload failed: {type(exc).__name__}: {exc}"
+
+
+# ── Clip scheduling tools ─────────────────────────────────────────────────────
+
+@mcp.tool()
+def review_episode_clips(episode_dir_path: str) -> str:
+    """
+    Show all clip descriptions from a completed broadcast pipeline run for review
+    before scheduling. Returns platform-specific captions for each clip so you
+    can request edits before calling schedule_episode_clips.
+
+    Args:
+        episode_dir_path: Path to the episode root directory returned by
+                          process_broadcast_episode or check_pipeline_status.
+
+    Returns:
+        Formatted review of every clip with YouTube Shorts, TikTok, and
+        Instagram captions. Includes clip slugs needed for description_overrides
+        in schedule_episode_clips.
+    """
+    import glob as _glob
+
+    status_path = os.path.join(episode_dir_path, "pipeline_status.json")
+    if not os.path.exists(status_path):
+        return f"pipeline_status.json not found in {episode_dir_path}."
+
+    from pipeline.episode import read_status
+    status = read_status(status_path)
+
+    if status.get("state") != "complete":
+        return (
+            f"Pipeline is not complete yet (state: {status.get('state', 'unknown')}).\n"
+            "Run check_pipeline_status to see current progress."
+        )
+
+    exported = status.get("exported_clips", [])
+    if not exported:
+        return "No exported clips found in pipeline status."
+
+    lines = [
+        f"Episode: {status.get('episode_title') or status.get('episode_id', '?')}",
+        f"Clips:   {len(exported)}\n",
+        "Review each clip's descriptions below. Note the slug for any edits.",
+        "─" * 60,
+    ]
+
+    for i, clip in enumerate(exported, 1):
+        title = clip.get("title", f"clip_{i}")
+        slug  = clip.get("slug", "")
+        desc_path = clip.get("descriptions", "")
+
+        lines.append(f"\n[{i}] {title}")
+        lines.append(f"    slug: {slug}")
+
+        # Show video paths
+        if clip.get("social"):
+            lines.append(f"    social : {clip['social']}")
+        if clip.get("youtube"):
+            lines.append(f"    youtube: {clip['youtube']}")
+
+        # Load descriptions
+        if desc_path and os.path.exists(desc_path):
+            with open(desc_path, "r", encoding="utf-8") as f:
+                descs = json.load(f)
+
+            lines.append("\n    ── YouTube Shorts ──")
+            lines.append(f"    {descs.get('youtube_short', '(none)')}")
+
+            lines.append("\n    ── TikTok ──")
+            lines.append(f"    {descs.get('tiktok', '(none)')}")
+
+            lines.append("\n    ── Instagram Reels ──")
+            lines.append(f"    {descs.get('instagram', '(none)')}")
+        else:
+            lines.append("    (no descriptions file found)")
+
+        lines.append("─" * 60)
+
+    lines.append(
+        "\nTo schedule with edits, call schedule_episode_clips with description_overrides:\n"
+        '  { "slug": { "youtube_short": "...", "tiktok": "...", "instagram": "..." } }'
+    )
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def schedule_episode_clips(
+    episode_dir_path: str,
+    channel: str = "neilbound",
+    platforms: list[str] = ["youtube", "tiktok", "instagram"],
+    description_overrides: dict = {},
+    start_date: str = "",
+    day_interval: int = 1,
+) -> str:
+    """
+    Schedule all clips from a completed broadcast episode at optimal posting times.
+    Reads descriptions from the pipeline output and enqueues each clip to the publish queue.
+
+    Call review_episode_clips first to see descriptions and request any edits,
+    then pass those edits via description_overrides.
+
+    Optimal posting times rotate through 12pm, 6pm, and 9am EST to avoid
+    looking automated.
+
+    Args:
+        episode_dir_path:      Path to the episode root directory.
+        channel:               Publishing channel: "neilbound" or "ilb". Default "neilbound".
+        platforms:             List of platforms to post to. Default all three.
+                               TikTok will be queued but may fail until app review is complete.
+        description_overrides: Optional per-clip description edits keyed by slug:
+                               { "slug": { "youtube_short": "...", "tiktok": "...", "instagram": "..." } }
+        start_date:            ISO date (YYYY-MM-DD) for the first post. Defaults to today.
+        day_interval:          Days between each post. Default 1 (daily). Use 2 for every other day.
+
+    Returns:
+        Summary of scheduled posts with dates, times, and platforms.
+    """
+    from pipeline.episode import read_status
+    from pipeline.publish_queue import enqueue
+    from datetime import date, datetime, timedelta, timezone
+    import config as _cfg
+    _brand = _cfg.active_brand(_cfg.load())
+
+    # ── Optimal posting time slots (EST = UTC-4 in summer, UTC-5 in winter) ──
+    # Research-backed windows for Instagram/TikTok/YouTube Shorts engagement.
+    # Rotating schedule so consecutive days don't look automated.
+    # Times in UTC (assume EDT = UTC-4):
+    #   12pm EDT = 16:00 UTC
+    #    6pm EDT = 22:00 UTC
+    #    9am EDT = 13:00 UTC
+    _POSTING_SLOTS_UTC = [16, 22, 13, 16, 22, 13, 16]  # 7-day rotation
+
+    status_path = os.path.join(episode_dir_path, "pipeline_status.json")
+    if not os.path.exists(status_path):
+        return f"pipeline_status.json not found in {episode_dir_path}."
+
+    status = read_status(status_path)
+    if status.get("state") != "complete":
+        return (
+            f"Pipeline is not complete (state: {status.get('state', 'unknown')}).\n"
+            "Use check_pipeline_status to monitor progress."
+        )
+
+    exported = status.get("exported_clips", [])
+    if not exported:
+        return "No exported clips found in pipeline status."
+
+    # Determine start date
+    if start_date:
+        post_date = date.fromisoformat(start_date)
+    else:
+        post_date = date.today()
+
+    lines = [
+        f"Scheduling {len(exported)} clip(s) for channel '{channel}'",
+        f"Platforms : {', '.join(platforms)}",
+        f"Starting  : {post_date.isoformat()}",
+        "",
+    ]
+
+    # QA gate — warn about any clips with validation issues
+    qa_blocked = [c for c in exported if c.get("qa_issues")]
+    if qa_blocked:
+        lines.append("QA WARNINGS — the following clips have issues:")
+        for c in qa_blocked:
+            for issue in c["qa_issues"]:
+                lines.append(f"  [{c.get('slug','?')}] {issue}")
+        lines.append("  These clips will still be scheduled — review before the upload time.\n")
+
+    scheduled_clips = []   # collected for checklist generation
+
+    for i, clip in enumerate(exported):
+        title = clip.get("title", f"clip_{i+1}")
+        slug  = clip.get("slug", "")
+
+        # Determine which clip file to use — social for TikTok/Instagram, youtube for YT
+        social_path  = clip.get("social", "")
+        youtube_path = clip.get("youtube", "")
+        clip_path    = social_path or youtube_path
+        if not clip_path or not os.path.exists(clip_path):
+            lines.append(f"  [{i+1}] SKIPPED — clip file not found: {clip_path}")
+            post_date += timedelta(days=day_interval)
+            continue
+
+        # Load base descriptions
+        desc_path = clip.get("descriptions", "")
+        descs = {}
+        if desc_path and os.path.exists(desc_path):
+            with open(desc_path, "r", encoding="utf-8") as f:
+                descs = json.load(f)
+
+        # Apply overrides
+        if slug in description_overrides:
+            descs.update(description_overrides[slug])
+
+        # Build per-platform titles/captions
+        yt_title    = descs.get("youtube_short", title)[:100]   # YouTube 100-char limit
+        tiktok_cap  = descs.get("tiktok", title)
+        ig_cap      = descs.get("instagram", title)
+
+        # Pick posting time for this day
+        hour_utc = _POSTING_SLOTS_UTC[i % len(_POSTING_SLOTS_UTC)]
+        post_dt  = datetime(
+            post_date.year, post_date.month, post_date.day,
+            hour_utc, 0, 0, tzinfo=timezone.utc
+        )
+        sched_iso = post_dt.isoformat()
+
+        # Enqueue with per-platform caption as description
+        # The publisher daemon uses title for TikTok/Instagram caption and
+        # description for YouTube — we pass the platform-appropriate text.
+        post_id = enqueue(
+            clip_path=social_path or youtube_path,
+            platforms=platforms,
+            title=yt_title,
+            description=ig_cap,        # stored for Instagram
+            scheduled_time_iso=sched_iso,
+            tags=[],
+            channel=channel,
+            extra={
+                "tiktok_caption":    tiktok_cap,
+                "instagram_caption": ig_cap,
+                "youtube_path":      youtube_path,
+                "playlist_id":       _brand.get("youtube_playlist_shorts", ""),
+            },
+        )
+
+        local_time_label = {16: "12:00 PM EST", 22: "6:00 PM EST", 13: "9:00 AM EST"}.get(hour_utc, f"{hour_utc}:00 UTC")
+
+        # Extract full episode URL from descriptions for checklist
+        import re as _re
+        ep_url_match = _re.search(r'https://youtu\.be/\S+', descs.get("youtube_short", ""))
+        ep_url = ep_url_match.group(0).rstrip("|").strip() if ep_url_match else ""
+
+        scheduled_clips.append({
+            "title":      title,
+            "post_id":    post_id,
+            "date_label": f"{post_date.isoformat()} at {local_time_label}",
+            "post_date":  post_date,
+            "episode_url": ep_url,
+            "youtube_short_url": "",   # filled in by daemon after upload
+            "yt_title":   yt_title,
+            "tiktok_cap": tiktok_cap,
+            "ig_cap":     ig_cap,
+        })
+
+        lines.append(
+            f"  [{i+1}] {title}\n"
+            f"       post_id  : {post_id}\n"
+            f"       date     : {post_date.isoformat()} at {local_time_label}\n"
+            f"       clip     : {os.path.basename(clip_path)}"
+        )
+
+        post_date += timedelta(days=day_interval)
+
+    lines.append(
+        "\nAll clips queued. The publisher daemon will upload each at its scheduled time.\n"
+        "Use list_scheduled_clips to review or cancel_scheduled_clip to remove any."
+    )
+
+    # ── Write upload checklist ─────────────────────────────────────────────
+    checklist_path = os.path.join(episode_dir_path, "UPLOAD_CHECKLIST.md")
+    _write_upload_checklist(checklist_path, scheduled_clips, platforms, channel)
+    lines.append(f"\nUpload checklist written to: {checklist_path}")
+
+    return "\n".join(lines)
+
+
+def _write_upload_checklist(path: str, scheduled_clips: list[dict], platforms: list[str], channel: str) -> None:
+    """
+    Write a per-clip, per-platform manual-action checklist to disk.
+
+    scheduled_clips: list of dicts with keys title, post_id, date_label, post_date,
+                     youtube_url, clip_path, yt_title, tiktok_cap, ig_cap
+    """
+    from datetime import datetime as _dt
+
+    lines = [
+        "# Upload Checklist",
+        f"Generated: {_dt.now().strftime('%Y-%m-%d %H:%M')}  |  Channel: {channel}",
+        "",
+        "The publisher daemon handles the actual uploads automatically.",
+        "These are the **manual steps** to complete in each platform's UI",
+        "after each clip goes live.",
+        "",
+        "---",
+        "",
+    ]
+
+    for i, clip in enumerate(scheduled_clips, 1):
+        title      = clip.get("title", f"Clip {i}")
+        post_id    = clip.get("post_id", "")
+        date_label = clip.get("date_label", "")
+        yt_url     = clip.get("youtube_short_url", "")
+        ep_url     = clip.get("episode_url", "")
+
+        lines += [
+            f"## Clip {i}: {title}",
+            f"Post ID: `{post_id}`  |  Scheduled: {date_label}",
+            "",
+        ]
+
+        if "youtube" in platforms:
+            lines += [
+                "### YouTube Shorts",
+                f"Direct URL (available ~5 min after upload): {yt_url or '(paste after upload)'}",
+                "",
+                "- [ ] **End screen** — YouTube Studio → Editor → End screen",
+                f"      Add a Video card pointing to the full episode: {ep_url or '(add episode URL)'}",
+                "      Place it in the last 5–20 seconds of the clip.",
+                "- [ ] **Pin a comment** — paste this after the Short is live:",
+                f"      Full episode: {ep_url or '(episode URL)'}",
+                "- [ ] **Playlist** — add to 'Is Love Blind Shorts' (create if it doesn't exist)",
+                "- [ ] **Category** — confirm set to 'Entertainment' or 'People & Blogs'",
+                "- [ ] **Not made for kids** — verify this is toggled off",
+                "- [ ] **Thumbnail** — review the auto-selected frame; swap if needed",
+                "",
+            ]
+
+        if "instagram" in platforms:
+            lines += [
+                "### Instagram Reels",
+                "- [ ] **Bio link** — update link in bio to the full episode URL before this posts",
+                f"      Full episode: {ep_url or '(episode URL)'}",
+                "- [ ] **Share to Story** — repost the Reel to your Story within the first hour",
+                "      (drives initial views and signals the algorithm)",
+                "- [ ] **Reply to early comments** — respond to the first 3–5 comments quickly",
+                "- [ ] **Co-host tag** — if applicable, tag the co-host account in the post",
+                "",
+            ]
+
+        if "tiktok" in platforms:
+            lines += [
+                "### TikTok",
+                "- [ ] **Cover frame** — set to the most expressive moment in the clip",
+                "- [ ] **Collection** — add to a TikTok Series/Collection for this show",
+                "- [ ] **Duet/Stitch** — enable both (increases discoverability)",
+                "- [ ] **Reply to early comments** — especially any that ask for more context",
+                "",
+            ]
+
+        lines += ["---", ""]
+
+    lines += [
+        "## General Notes",
+        "",
+        "**What the pipeline already handles automatically:**",
+        "- Video upload to all platforms",
+        "- Title and description with full episode link",
+        "- Hashtags and tags",
+        "- Karaoke captions burned into the social clip",
+        "- Posting time optimization (rotating 9am / 12pm / 6pm EST)",
+        "",
+        "**What always requires manual action:**",
+        "- YouTube end screen / related video card (API limitation — no programmatic end screen for Shorts)",
+        "- Pinned YouTube comment",
+        "- Instagram bio link update",
+        "- TikTok cover frame selection",
+        "- Any boosting / paid promotion decisions",
+        "",
+        "**If a clip fails to upload:**",
+        "- Check `list_scheduled_clips` for the error message",
+        "- Fix the issue (token expired, file missing, etc.)",
+        "- Use `publish_clip_now` with the post_id to retry immediately",
+        "- Or update the scheduled time and let the daemon retry",
+    ]
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

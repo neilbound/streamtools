@@ -7,6 +7,7 @@ Timestamps are snapped to real word boundaries after Claude responds.
 
 import json
 import os
+import time
 
 import anthropic
 from dotenv import load_dotenv
@@ -106,22 +107,50 @@ Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds
   }}
 ]"""
 
-    message = client.messages.create(
-        model="claude-opus-4-6",  # upgraded from sonnet on test/model-upgrades branch
-        max_tokens=1024,
-        system=system,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    # ── Claude API call with retry (handles transient 529 / overload errors) ───────
+    max_attempts = 3
+    last_error: Exception | None = None
+    clips = None
 
-    raw = message.content[0].text.strip()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            message = client.messages.create(
+                model="claude-opus-4-6",  # upgraded from sonnet on test/model-upgrades branch
+                max_tokens=1024,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+            )
 
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
+            raw = message.content[0].text.strip()
 
-    clips = json.loads(raw)
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+
+            clips = json.loads(raw)
+            break  # Success — exit retry loop
+
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            print(
+                f"[clip_finder] Attempt {attempt}/{max_attempts}: Claude returned invalid JSON — {exc}\n"
+                f"  Raw response (first 300 chars): {raw[:300] if 'raw' in dir() else '(no response)'}"
+            )
+            if attempt < max_attempts:
+                time.sleep(2 ** (attempt - 1))  # 1s, 2s
+
+        except Exception as exc:
+            last_error = exc
+            print(f"[clip_finder] Attempt {attempt}/{max_attempts}: API error — {type(exc).__name__}: {exc}")
+            if attempt < max_attempts:
+                time.sleep(2 ** (attempt - 1))  # 1s, 2s
+
+    if clips is None:
+        raise RuntimeError(
+            f"[clip_finder] All {max_attempts} attempts failed. Last error: {last_error}"
+        )
 
     # Sort chronologically before de-overlapping
     clips.sort(key=lambda c: float(c["start_time"]))
