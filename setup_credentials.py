@@ -122,7 +122,10 @@ def setup_youtube(channel: str = "NEILBOUND"):
         )
         sys.exit(1)
 
-    scopes = ["https://www.googleapis.com/auth/youtube.upload"]
+    scopes = [
+        "https://www.googleapis.com/auth/youtube.upload",  # upload videos
+        "https://www.googleapis.com/auth/youtube",         # manage playlists (add Shorts to playlist)
+    ]
 
     print()
     print("Opening browser for Google authorization (port 8080)...")
