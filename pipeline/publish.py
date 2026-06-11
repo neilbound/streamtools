@@ -13,7 +13,7 @@ Functions:
 import os
 import math
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 # ── Guard + credential helpers ─────────────────────────────────────────────────
@@ -130,9 +130,18 @@ def upload_youtube(
         dt = datetime.fromisoformat(scheduled_time)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        publish_at_str = dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        privacy = "private"
-        is_scheduled = True
+        # YouTube only honors a publishAt that is in the future. When the daemon
+        # processes a *due* post, the scheduled time has just passed, so a past
+        # publishAt would be rejected / leave the video stuck private. In that
+        # case publish immediately as public instead of scheduling.
+        if dt > datetime.now(tz=timezone.utc) + timedelta(seconds=60):
+            publish_at_str = dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            privacy = "private"
+            is_scheduled = True
+        else:
+            publish_at_str = None
+            privacy = "public"
+            is_scheduled = False
     else:
         publish_at_str = None
         privacy = "public"
@@ -293,9 +302,15 @@ def upload_youtube_episode(
         dt = datetime.fromisoformat(scheduled_time)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        publish_at_str = dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        privacy = "private"
-        is_scheduled = True
+        # Past/now publishAt is invalid for YouTube — publish immediately instead.
+        if dt > datetime.now(tz=timezone.utc) + timedelta(seconds=60):
+            publish_at_str = dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            privacy = "private"
+            is_scheduled = True
+        else:
+            publish_at_str = None
+            privacy = "public"
+            is_scheduled = False
     else:
         publish_at_str = None
         privacy = "public"
