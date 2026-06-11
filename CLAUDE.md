@@ -102,6 +102,33 @@ pairs — no need to pass `--vertical-paths`, and no need to hand-write `temp/`
 launcher scripts to work around emoji (📱) paths in CLI args. Pass `vertical_paths`
 only to override the auto-detected ordering.
 
+## Publishing & Channels — operational rules
+
+The publish queue (`output/publish_queue.json`) + `publisher_daemon.py` (Task Scheduler,
+every 15 min) handle uploads. Hard-won rules — violate these and posts silently fail:
+
+- **Verify the authorized channel after ANY YouTube re-auth.** Channel `ilb` must authorize the
+  *Is Love Blind? Podcast* Google account — a **separate login**, NOT a brand account under the
+  operator's personal ("Neil") account. Picking the wrong account at the OAuth screen sends every
+  upload to the wrong channel. Check with `channels().list(part='snippet', mine=True)`.
+- **The OAuth consent screen must be "In production," not "Testing."** Testing tokens expire every
+  7 days (recurring `invalid_grant`). Production (even unverified) = long-lived tokens. Unverified
+  is fine for a single operator's own account.
+- **YouTube needs two scopes:** `youtube.upload` + `youtube`. The broad `youtube` scope is required
+  to add Shorts to the playlist; upload-only returns 403 on `playlistItems.insert`.
+- **Daemon publishes on-due, immediately.** `upload_youtube` only sets `publishAt` (private+scheduled)
+  for times >60s in the future; once a post is due it publishes public immediately. Never "fix" this
+  to always schedule — a past `publishAt` strands the video private.
+- **Idempotency:** the daemon skips platforms already `ok`. To re-post, use `retry_failed()` (re-arms
+  only failed platforms). To force a re-upload of an already-`ok` platform (e.g. wrong channel), clear
+  that platform's result and set status `pending` — never blanket-reset `results={}` (re-posts the
+  successful platforms too).
+- **TikTok (`ilb`) is unconfigured** — uploads fail until `setup_credentials.py --platform tiktok
+  --channel ilb`. Unaudited apps must post `privacy_level=SELF_ONLY` (default `PUBLIC_TO_EVERYONE`
+  is rejected); flip to public in-app afterward.
+- **Use the venv python** for any queue/credential script — `filelock`, `dotenv`, google libs live
+  in `.venv312`, not system Python.
+
 ## Git
 
 - `master` is the stable base; feature work goes on named branches
