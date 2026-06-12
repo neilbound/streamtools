@@ -15,6 +15,8 @@ import sys
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
+from filelock import FileLock, Timeout
+
 # Add project root to sys.path so pipeline/ is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -24,11 +26,13 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), ov
 from pipeline.publish_queue import (
     get_due,
     get_retryable,
+    is_fatal_error,
     mark_complete,
     mark_failed,
     schedule_retry,
 )
 from pipeline.publish import upload_youtube, upload_tiktok, upload_instagram
+from pipeline.validate import quick_probe_check
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -103,6 +107,8 @@ def _upload_platform(platform: str, entry: dict) -> dict:
             title=tiktok_title,
             tags=tags,
             channel=channel,
+            privacy_level=entry.get("tiktok_privacy", ""),
+            post_mode=entry.get("tiktok_mode", ""),
         )
     elif platform == "instagram":
         # Use per-platform caption if provided, otherwise fall back to description or title
@@ -119,7 +125,31 @@ def _upload_platform(platform: str, entry: dict) -> dict:
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 
+# Whole-run exclusive lock. Prevents two daemon invocations (e.g. a manual run
+# overlapping the Task Scheduler run) from both uploading the same due post before
+# either marks it complete — the race that caused a duplicate upload.
+_RUN_LOCK = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "output", "publisher_daemon.run.lock"
+)
+
+
 def main():
+    os.makedirs(os.path.dirname(_RUN_LOCK), exist_ok=True)
+    run_lock = FileLock(_RUN_LOCK, timeout=0)   # non-blocking
+    try:
+        run_lock.acquire()
+    except Timeout:
+        log.warning(
+            "Another daemon instance is already running — exiting to avoid overlap."
+        )
+        return
+    try:
+        _run()
+    finally:
+        run_lock.release()
+
+
+def _run():
     now = datetime.now(tz=timezone.utc)
     log.info("Starting at %s", now.isoformat())
 
@@ -157,24 +187,21 @@ def main():
         log.info("  Clip      : %s", entry.get("clip_path", "?"))
         log.info("  Scheduled : %s", entry.get("scheduled_time", "?"))
 
-        # ── Pre-flight: verify the clip file exists and is not suspiciously small ──
+        # ── Pre-flight: single ffprobe sanity check (streams, duration, aspect).
+        # No decode — full QA already ran at export and the scheduling gate.
+        # Failures are fatal (no auto-retry): a corrupt or missing file will
+        # not heal between daemon rounds.
         clip_path = entry.get("clip_path", "")
-        if not clip_path or not os.path.exists(clip_path):
-            error_msg = f"FILE NOT FOUND: {clip_path!r}"
+        probe_err = quick_probe_check(clip_path, entry.get("expected_orientation", ""))
+        if probe_err:
+            error_msg = f"PRE-FLIGHT: {probe_err}"
             log.error("  [pre-flight] FAILED — %s", error_msg)
             for platform in platforms:
-                mark_failed(post_id, platform, error_msg)
+                mark_failed(post_id, platform, error_msg, fatal=True)
             failure_count += len(platforms)
             continue
-        size_mb = os.path.getsize(clip_path) / (1024 * 1024)
-        if size_mb < 0.1:
-            error_msg = f"FILE TOO SMALL ({size_mb:.2f} MB) — may be corrupt: {clip_path!r}"
-            log.error("  [pre-flight] FAILED — %s", error_msg)
-            for platform in platforms:
-                mark_failed(post_id, platform, error_msg)
-            failure_count += len(platforms)
-            continue
-        log.info("  [pre-flight] OK — %.1f MB", size_mb)
+        log.info("  [pre-flight] OK — %.1f MB",
+                 os.path.getsize(clip_path) / (1024 * 1024))
 
         existing_results = entry.get("results", {})
         round_finished = True   # all target platforms ended 'ok' this round
@@ -195,10 +222,17 @@ def main():
                 success_count += 1
             except Exception as exc:
                 error_msg = f"{type(exc).__name__}: {exc}"
+                fatal = is_fatal_error(exc)
                 log.exception("  [%s] FAILED — %s", platform, error_msg)
-                mark_failed(post_id, platform, error_msg)
+                mark_failed(post_id, platform, error_msg, fatal=fatal)
                 failure_count += 1
-                round_finished = False
+                if fatal:
+                    # Credential/config errors don't heal on a backoff timer —
+                    # don't burn the retry budget; wait for manual retry_failed.
+                    log.error("  [%s] FATAL — credential/config error, will NOT "
+                              "auto-retry: %s", platform, error_msg)
+                else:
+                    round_finished = False
                 # Continue to next platform — do not abort the whole run
 
         # If the entry still has unfinished platforms, schedule an automatic

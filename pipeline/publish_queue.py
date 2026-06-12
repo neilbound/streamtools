@@ -135,6 +135,10 @@ def enqueue(
     Returns:
         post_id (8-character UUID prefix) for use with mark_complete / mark_failed / cancel.
     """
+    # Warnings are persisted into the queue entry (and surfaced by the MCP
+    # tools) because stdout is discarded when this runs under Task Scheduler.
+    entry_warnings: list[str] = []
+
     # ── Normalise scheduled_time ────────────────────────────────────────────────
     dt = datetime.fromisoformat(scheduled_time_iso)
     if dt.tzinfo is None:
@@ -144,6 +148,7 @@ def enqueue(
     # ── 2. Title truncation (YouTube max 100 chars) ─────────────────────────────
     if len(title) > 100:
         title = title[:97] + "..."
+        entry_warnings.append("title truncated to 100 chars for YouTube")
         print(f"[publish_queue] WARNING: title truncated to 100 chars for YouTube")
 
     # ── 3. Strip markdown from all captions ────────────────────────────────────
@@ -157,6 +162,9 @@ def enqueue(
     # ── 4. Platform-specific content checks ────────────────────────────────────
     tiktok_cap = (extra or {}).get("tiktok_caption", "")
     if tiktok_cap and len(tiktok_cap) > 150:
+        entry_warnings.append(
+            f"TikTok caption is {len(tiktok_cap)} chars (best practice <= 150)"
+        )
         print(
             f"[publish_queue] WARNING: TikTok caption is {len(tiktok_cap)} chars "
             f"(best practice ≤ 150) — consider shortening"
@@ -166,6 +174,9 @@ def enqueue(
     if ig_cap:
         hashtag_count = ig_cap.count("#")
         if hashtag_count > 28:
+            entry_warnings.append(
+                f"Instagram caption has {hashtag_count} hashtags (max 30, best practice <= 28)"
+            )
             print(
                 f"[publish_queue] WARNING: Instagram caption has {hashtag_count} hashtags "
                 f"(max 30, best practice ≤ 28)"
@@ -197,6 +208,26 @@ def enqueue(
             except Exception:
                 pass
 
+        # ── 4b. Duplicate-risk warning (same channel, same clip, shared platform) ──
+        # The 1-hour block above handles accidental double-enqueues; this catches
+        # the same clip being re-queued to the same platform later (sometimes
+        # deliberate, e.g. wrong-channel recovery — so warn, never block).
+        for existing in queue:
+            if existing.get("status") == "cancelled":
+                continue
+            if existing.get("clip_path") != clip_path:
+                continue
+            if existing.get("channel") != channel:
+                continue
+            shared = set(existing.get("platforms", [])) & set(platforms)
+            if shared:
+                entry_warnings.append(
+                    f"DUPLICATE RISK: this clip is already queued/posted to "
+                    f"{', '.join(sorted(shared))} on channel '{channel}' as post "
+                    f"{existing.get('post_id')} (scheduled {existing.get('scheduled_time')})"
+                )
+                break
+
         # ── 5. Daily density check ───────────────────────────────────────────────
         sched_date = dt.date()
         posts_that_day = sum(
@@ -206,6 +237,10 @@ def enqueue(
             and _entry_date(e) == sched_date
         )
         if posts_that_day >= 2:
+            entry_warnings.append(
+                f"{posts_that_day + 1} posts now scheduled for {sched_date} "
+                f"on channel '{channel}'"
+            )
             print(
                 f"[publish_queue] WARNING: {posts_that_day + 1} posts now scheduled "
                 f"for {sched_date} on channel '{channel}' — consider spreading them out"
@@ -215,6 +250,9 @@ def enqueue(
         lag = (_now_utc() - dt).total_seconds()
         if lag > 3600:
             hours_ago = int(lag // 3600)
+            entry_warnings.append(
+                f"scheduled_time is {hours_ago}h in the past — will upload at next daemon run"
+            )
             print(
                 f"[publish_queue] WARNING: scheduled_time is {hours_ago}h in the past — "
                 f"will upload at next daemon run"
@@ -234,6 +272,7 @@ def enqueue(
             "channel":        channel,
             "status":         "pending",
             "results":        {},
+            "warnings":       entry_warnings,
         }
         if extra:
             entry.update(extra)
@@ -242,6 +281,35 @@ def enqueue(
         _save(queue)
 
     return post_id
+
+
+def get_entry(post_id: str) -> Optional[dict]:
+    """Return the queue entry for post_id, or None if not found."""
+    for entry in _load():
+        if entry.get("post_id") == post_id:
+            return entry
+    return None
+
+
+def confirm_manual_post(post_id: str, platform: str = "tiktok") -> bool:
+    """
+    Record that the operator completed a platform's manual posting step
+    (e.g. tapped Post on a TikTok inbox upload). Clears the entry from the
+    NEEDS ATTENTION draft reminder. Returns False if the post/platform result
+    wasn't found or didn't require a manual post.
+    """
+    with _queue_lock():
+        queue = _load()
+        for entry in queue:
+            if entry.get("post_id") != post_id:
+                continue
+            res = entry.get("results", {}).get(platform)
+            if not res or not res.get("requires_manual_post"):
+                return False
+            res["manually_posted"] = True
+            _save(queue)
+            return True
+    return False
 
 
 def _entry_date(entry: dict):
@@ -290,13 +358,52 @@ DEFAULT_MAX_ATTEMPTS = 4      # give up after this many daemon rounds
 RETRY_BASE_MINUTES   = 30     # backoff = base * 2**(attempts-1): 30, 60, 120 min
 
 
-def _entry_has_unfinished_platform(entry: dict) -> bool:
-    """True if any of the entry's target platforms is not yet uploaded ('ok')."""
+# Substrings that indicate a credential/config failure that will not heal on a
+# backoff timer (the operator has to fix something). Matched case-insensitively
+# against the exception text by is_fatal_error().
+FATAL_ERROR_MARKERS = (
+    "invalid_grant", "invalid_client", "401", "403",
+    "unauthorized", "forbidden", "credentials", "not set for channel",
+    "access_token", "refresh token",
+)
+
+
+def is_fatal_error(exc: Exception) -> bool:
+    """
+    True for errors that auto-retry cannot fix (missing/expired credentials,
+    bad config) — these skip the retry budget and wait for manual retry_failed.
+
+    Network errors are checked first and always retryable: TimeoutError and
+    ConnectionError are OSError subclasses (and requests' exceptions inherit
+    IOError), so a naive isinstance(EnvironmentError) test would misclassify
+    every network blip as fatal. publish.py's missing-credential errors are
+    caught by the "not set for channel" marker; ValueError covers config
+    mistakes like a bad post_mode.
+    """
+    type_names = {c.__name__ for c in type(exc).__mro__}
+    if any("Timeout" in n or "Connection" in n for n in type_names):
+        return False
+    if isinstance(exc, ValueError):
+        return True
+    text = str(exc).lower()
+    return any(marker in text for marker in FATAL_ERROR_MARKERS)
+
+
+def _entry_has_unfinished_platform(entry: dict, ignore_fatal: bool = False) -> bool:
+    """
+    True if any of the entry's target platforms is not yet uploaded ('ok').
+    With ignore_fatal=True, platforms whose failure was marked fatal don't
+    count — used by get_retryable so fatal failures never re-enter the pool.
+    """
     results = entry.get("results", {})
-    return any(
-        results.get(p, {}).get("status") != "ok"
-        for p in entry.get("platforms", [])
-    )
+    for p in entry.get("platforms", []):
+        r = results.get(p, {})
+        if r.get("status") == "ok":
+            continue
+        if ignore_fatal and r.get("fatal"):
+            continue
+        return True
+    return False
 
 
 def get_retryable(now: Optional[datetime] = None,
@@ -318,7 +425,7 @@ def get_retryable(now: Optional[datetime] = None,
     for entry in queue:
         if entry.get("status") not in ("failed", "partial"):
             continue
-        if not _entry_has_unfinished_platform(entry):
+        if not _entry_has_unfinished_platform(entry, ignore_fatal=True):
             continue
         if entry.get("attempts", 0) >= max_attempts:
             continue  # attempt budget exhausted — left for manual retry_failed
@@ -396,7 +503,7 @@ def mark_complete(post_id: str, platform: str, result: dict) -> None:
         _save(queue)
 
 
-def mark_failed(post_id: str, platform: str, error: str) -> None:
+def mark_failed(post_id: str, platform: str, error: str, fatal: bool = False) -> None:
     """
     Record a failed upload for a specific platform.
 
@@ -407,13 +514,19 @@ def mark_failed(post_id: str, platform: str, error: str) -> None:
         post_id:  The 8-character post identifier.
         platform: Platform key, e.g. "tiktok".
         error:    Human-readable error message or exception string.
+        fatal:    True for credential/config errors that auto-retry cannot fix —
+                  the platform is excluded from get_retryable until the operator
+                  runs retry_failed (which clears fatal results).
     """
     with _queue_lock():
         queue = _load()
         for entry in queue:
             if entry["post_id"] != post_id:
                 continue
-            entry["results"][platform] = {"status": "error", "error": error}
+            result = {"status": "error", "error": error}
+            if fatal:
+                result["fatal"] = True
+            entry["results"][platform] = result
             # At least one platform failed — but others may have succeeded
             any_ok    = any(r.get("status") == "ok"    for r in entry["results"].values())
             any_error = any(r.get("status") == "error" for r in entry["results"].values())
@@ -435,6 +548,45 @@ def list_all() -> list[dict]:
     except Exception:
         pass
     return queue
+
+
+def find_schedule_gaps(now: Optional[datetime] = None,
+                       min_per_day: int = 1) -> list[tuple[str, int]]:
+    """
+    Find calendar days in the upcoming pending window that fall below the expected
+    posting cadence — used to warn about gaps after a reschedule.
+
+    Scans every day from today through the last pending post. Returns a list of
+    (iso_date, post_count) for each day with fewer than `min_per_day` pending
+    posts. An empty list means no gaps.
+
+    Args:
+        now:         Reference time (UTC). Defaults to now.
+        min_per_day: Minimum posts per day before a day counts as a gap. Default 1
+                     (i.e. only fully-empty days are flagged). Pass 2 to flag any
+                     day below a 2/day cadence.
+    """
+    now = now or _now_utc()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    from collections import Counter
+    dates = [d for d in (_entry_date(e) for e in _load()
+                         if e.get("status") == "pending")
+             if d and d >= now.date()]
+    if not dates:
+        return []
+
+    counts = Counter(dates)
+    gaps: list[tuple[str, int]] = []
+    d = min(dates)
+    last = max(dates)
+    while d <= last:
+        n = counts.get(d, 0)
+        if n < min_per_day:
+            gaps.append((d.isoformat(), n))
+        d += timedelta(days=1)
+    return gaps
 
 
 def cancel(post_id: str) -> bool:
