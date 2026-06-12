@@ -48,7 +48,7 @@ from pipeline.captions import build_karaoke_ass, build_srt
 from pipeline.export import export_episode_youtube
 from pipeline.podcast import export_podcast_mp3
 from pipeline.describe import generate_episode_descriptions, generate_clip_descriptions
-from pipeline.validate import validate_clip, format_validation
+from pipeline.validate import validate_clip, format_validation, valid_intermediate
 
 
 def _snap_to_sentence_end(end: float, words: list[dict], window: float = 12.0,
@@ -111,6 +111,43 @@ def _log(status_path: str, step: str, message: str, **extra) -> None:
     write_status(status_path, **{step: {"message": message, "ts": ts, **extra}})
 
 
+def _validate_clip_variants(
+    clip_files: dict,
+    start: float,
+    end: float,
+    title: str,
+    transcript_words: list[dict],
+) -> tuple[list[str], list[str]]:
+    """
+    Run QA on every exported variant of a clip (social and/or youtube) and
+    merge the results. Signal checks (the decode pass) run only on the first
+    variant — both encodes share source/cut points, so black frames and audio
+    levels are identical; the cheaper probe checks run on each file.
+    """
+    qa_issues:   list[str] = []
+    qa_warnings: list[str] = []
+    first = True
+    for variant in ("social", "youtube"):
+        path = clip_files.get(variant)
+        if not path:
+            continue
+        # Transcript coverage and signal checks depend on the cut, not the
+        # encode — run them once; later variants get file/probe checks only.
+        issues, warnings = validate_clip(
+            clip_path        = path,
+            start            = start,
+            end              = end,
+            title            = title,
+            transcript_words = transcript_words if first else None,
+            deep             = first,
+        )
+        prefix = "" if first else f"[{variant}] "
+        qa_issues.extend(prefix + i for i in issues)
+        qa_warnings.extend(prefix + w for w in warnings)
+        first = False
+    return qa_issues, qa_warnings
+
+
 def run(
     episode_id: str,
     source_paths: list[str],
@@ -171,7 +208,11 @@ def run(
         else:
             # Resume: find existing portrait or use source
             if os.path.exists(paths["portrait"]):
-                video_path = paths["portrait"]
+                if valid_intermediate(paths["portrait"], "video"):
+                    video_path = paths["portrait"]
+                else:
+                    print(f"[compose] WARNING: portrait.mp4 exists but is invalid — ignoring it")
+                    video_path = source_paths[0]
             else:
                 video_path = source_paths[0]
             print(f"[compose] Skipped (resuming) — using {video_path}")
@@ -184,6 +225,11 @@ def run(
             write_status(status_path, video_duration=duration)
             _log(status_path, "clean", "Done", output=paths["clean"])
         else:
+            if not valid_intermediate(paths["clean"], "wav"):
+                raise RuntimeError(
+                    f"clean.wav is missing or invalid ({paths['clean']}) — "
+                    f"re-run without --skip-to-clips/--export-only to regenerate it"
+                )
             duration = get_video_duration(video_path)
             write_status(status_path, video_duration=duration)
             print(f"[clean] Skipped (resuming) — using {paths['clean']}")
@@ -197,13 +243,18 @@ def run(
             _log(status_path, "transcribe", f"Done — {len(transcript['words']):,} words",
                  output=paths["transcript"], word_count=len(transcript["words"]))
         else:
+            if not valid_intermediate(paths["transcript"], "transcript"):
+                raise RuntimeError(
+                    f"transcript.json is corrupt or empty ({paths['transcript']}) — "
+                    f"delete it and re-run to re-transcribe"
+                )
             with open(paths["transcript"], "r", encoding="utf-8") as f:
                 transcript = json.load(f)
             print(f"[transcribe] Skipped (resuming) — loaded {len(transcript['words']):,} words")
 
         # ── Step 4: Profanity filter ───────────────────────────────────────────
         if filter_audio and not export_only:
-            if not skip_to_clips and os.path.exists(paths["filtered"]):
+            if not skip_to_clips and valid_intermediate(paths["filtered"], "wav"):
                 # Resume: filtered file already exists, just re-apply censored transcript
                 _log(status_path, "filter", "Using cached filtered audio...")
                 transcript, censored = censor_transcript(transcript)
@@ -218,7 +269,7 @@ def run(
                 else:
                     _log(status_path, "filter", "Done — no profanity detected")
         elif filter_audio and export_only:
-            if os.path.exists(paths["filtered"]):
+            if valid_intermediate(paths["filtered"], "wav"):
                 original_words = list(transcript["words"])
                 transcript, censored = censor_transcript(transcript)
                 print(f"[filter] Skipped (resuming) — using {paths['filtered']}")
@@ -251,7 +302,7 @@ def run(
 
         # ── Step 6: Export clips ───────────────────────────────────────────────
         # Use filtered audio if it exists, otherwise fall back to clean audio
-        audio_path = paths["filtered"] if filter_audio and os.path.exists(paths["filtered"]) else paths["clean"]
+        audio_path = paths["filtered"] if filter_audio and valid_intermediate(paths["filtered"], "wav") else paths["clean"]
         exported = []
 
         for i, clip in enumerate(clips):
@@ -286,12 +337,8 @@ def run(
                 clip_files["srt"]     = srt_path
 
             # ── QA validation ──────────────────────────────────────────────
-            qa_issues, qa_warnings = validate_clip(
-                clip_path        = clip_files.get("social") or clip_files.get("youtube", ""),
-                start            = start,
-                end              = end,
-                title            = title,
-                transcript_words = transcript["words"],
+            qa_issues, qa_warnings = _validate_clip_variants(
+                clip_files, start, end, title, transcript["words"],
             )
             print(format_validation(qa_issues, qa_warnings, title))
             exported.append({
@@ -424,7 +471,7 @@ def run_broadcast(
                 write_status(status_path, compose={"message": "No local recordings — using horizontal", "output": horizontal_path})
                 print(f"[compose] No local recordings — using horizontal StreamYard download")
         else:
-            episode_video_src = paths["portrait"] if os.path.exists(paths["portrait"]) else horizontal_path
+            episode_video_src = paths["portrait"] if valid_intermediate(paths["portrait"], "video") else horizontal_path
             print(f"[compose] Skipped (resuming) — using {episode_video_src}")
 
         # ── Step 2: Clean audio (from horizontal source) ───────────────────────
@@ -448,13 +495,18 @@ def run_broadcast(
             _log(status_path, "transcribe", f"Done — {len(transcript['words']):,} words",
                  output=paths["transcript"], word_count=len(transcript["words"]))
         else:
+            if not valid_intermediate(paths["transcript"], "transcript"):
+                raise RuntimeError(
+                    f"transcript.json is corrupt or empty ({paths['transcript']}) — "
+                    f"delete it and re-run to re-transcribe"
+                )
             with open(paths["transcript"], "r", encoding="utf-8") as f:
                 transcript = json.load(f)
             print(f"[transcribe] Skipped (resuming) — loaded {len(transcript['words']):,} words")
 
         # ── Step 4: Profanity filter ───────────────────────────────────────────
         if filter_audio and not export_only:
-            if not skip_to_clips and os.path.exists(paths["filtered"]):
+            if not skip_to_clips and valid_intermediate(paths["filtered"], "wav"):
                 _log(status_path, "filter", "Using cached filtered audio...")
                 transcript, censored = censor_transcript(transcript)
                 _log(status_path, "filter",
@@ -469,7 +521,7 @@ def run_broadcast(
                 else:
                     _log(status_path, "filter", "Done — no profanity detected")
         elif filter_audio and export_only:
-            if os.path.exists(paths["filtered"]):
+            if valid_intermediate(paths["filtered"], "wav"):
                 original_words = list(transcript["words"])
                 transcript, censored = censor_transcript(transcript)
                 print(f"[filter] Skipped (resuming) — using {paths['filtered']}")
@@ -484,7 +536,7 @@ def run_broadcast(
                     _log(status_path, "filter", "Done — no profanity detected")
 
         # Determine which audio to use for exports
-        audio_path = paths["filtered"] if filter_audio and os.path.exists(paths["filtered"]) else paths["clean"]
+        audio_path = paths["filtered"] if filter_audio and valid_intermediate(paths["filtered"], "wav") else paths["clean"]
 
         # ── Step 5: Full episode video export ─────────────────────────────────
         if not export_only or not os.path.exists(paths["episode_video"]):
@@ -621,12 +673,8 @@ def run_broadcast(
                 print(f"[clip_desc_{i+1}] Warning: description generation failed: {e}")
 
             # ── QA validation ──────────────────────────────────────────────
-            qa_issues, qa_warnings = validate_clip(
-                clip_path        = clip_files.get("social") or clip_files.get("youtube", ""),
-                start            = start,
-                end              = end,
-                title            = title_str,
-                transcript_words = transcript["words"],
+            qa_issues, qa_warnings = _validate_clip_variants(
+                clip_files, start, end, title_str, transcript["words"],
             )
             print(format_validation(qa_issues, qa_warnings, title_str))
             exported.append({
@@ -890,7 +938,7 @@ def run_shorts_season(
     try:
         # ── Step 1: Stitch horizontals → full episode source ───────────────────
         h_paths = [seg["horizontal"] for seg in segments]
-        if not export_only and not os.path.exists(paths["stitched"]):
+        if not export_only and not valid_intermediate(paths["stitched"], "video"):
             _log(status_path, "stitch",
                  f"Stitching {len(segments)} segments into full episode...")
             _, offsets = stitch_segments(h_paths, paths["stitched"])
@@ -929,7 +977,7 @@ def run_shorts_season(
 
         # ── Step 2: Clean audio from stitched file ─────────────────────────────
         full_duration = sum(s["duration"] for s in segments)
-        if not export_only and not os.path.exists(paths["clean"]):
+        if not export_only and not valid_intermediate(paths["clean"], "wav"):
             _log(status_path, "clean", "Enhancing speech with DeepFilterNet3...")
             clean_audio(paths["stitched"], paths["clean"])
             write_status(status_path, video_duration=full_duration)
@@ -939,7 +987,7 @@ def run_shorts_season(
             print(f"[clean] Skipped (resuming) — using {paths['clean']}")
 
         # ── Step 3: Transcribe ─────────────────────────────────────────────────
-        if not export_only and not os.path.exists(paths["transcript"]):
+        if not export_only and not valid_intermediate(paths["transcript"], "transcript"):
             _log(status_path, "transcribe", "Transcribing with Deepgram Nova-3...")
             transcript = transcribe(paths["clean"])
             with open(paths["transcript"], "w", encoding="utf-8") as f:
@@ -949,13 +997,18 @@ def run_shorts_season(
                  output=paths["transcript"],
                  word_count=len(transcript["words"]))
         else:
+            if not valid_intermediate(paths["transcript"], "transcript"):
+                raise RuntimeError(
+                    f"transcript.json is corrupt or empty ({paths['transcript']}) — "
+                    f"delete it and re-run to re-transcribe"
+                )
             with open(paths["transcript"], "r", encoding="utf-8") as f:
                 transcript = json.load(f)
             print(f"[transcribe] Skipped (resuming) — loaded {len(transcript['words']):,} words")
 
         # ── Step 4: Profanity filter ───────────────────────────────────────────
         if filter_audio and not export_only:
-            if os.path.exists(paths["filtered"]):
+            if valid_intermediate(paths["filtered"], "wav"):
                 _log(status_path, "filter", "Using cached filtered audio...")
                 transcript, censored = censor_transcript(transcript)
                 _log(status_path, "filter",
@@ -972,7 +1025,7 @@ def run_shorts_season(
                 else:
                     _log(status_path, "filter", "Done — no profanity detected")
         elif filter_audio and export_only:
-            if os.path.exists(paths["filtered"]):
+            if valid_intermediate(paths["filtered"], "wav"):
                 transcript, _ = censor_transcript(transcript)
                 print(f"[filter] Skipped (resuming) — using {paths['filtered']}")
             else:
@@ -986,7 +1039,7 @@ def run_shorts_season(
 
         audio_path = (
             paths["filtered"]
-            if filter_audio and os.path.exists(paths["filtered"])
+            if filter_audio and valid_intermediate(paths["filtered"], "wav")
             else paths["clean"]
         )
 
@@ -1007,7 +1060,7 @@ def run_shorts_season(
                 )
 
             # V-Step 1: Stitch vertical segments
-            if not export_only and not os.path.exists(paths["vertical_stitched"]):
+            if not export_only and not valid_intermediate(paths["vertical_stitched"], "video"):
                 _log(status_path, "v_stitch",
                      f"Stitching {len(vertical_paths)} vertical segments...")
                 _, v_offsets = stitch_segments(vertical_paths, paths["vertical_stitched"])
@@ -1029,7 +1082,7 @@ def run_shorts_season(
                 seg["v_duration"] = get_video_duration(vertical_paths[i])
 
             # V-Step 2: Clean vertical audio
-            if not export_only and not os.path.exists(paths["vertical_clean"]):
+            if not export_only and not valid_intermediate(paths["vertical_clean"], "wav"):
                 _log(status_path, "v_clean",
                      "Enhancing vertical audio with DeepFilterNet3...")
                 clean_audio(paths["vertical_stitched"], paths["vertical_clean"])
@@ -1042,7 +1095,7 @@ def run_shorts_season(
                 )
 
             # V-Step 3: Transcribe vertical audio
-            if not export_only and not os.path.exists(paths["vertical_transcript"]):
+            if not export_only and not valid_intermediate(paths["vertical_transcript"], "transcript"):
                 _log(status_path, "v_transcribe",
                      "Transcribing vertical audio with Deepgram Nova-3...")
                 v_transcript = transcribe(paths["vertical_clean"])
@@ -1062,7 +1115,7 @@ def run_shorts_season(
 
             # V-Step 4: Profanity filter on vertical audio
             if filter_audio and not export_only:
-                if os.path.exists(paths["vertical_filtered"]):
+                if valid_intermediate(paths["vertical_filtered"], "wav"):
                     v_transcript, _ = censor_transcript(v_transcript)
                     print("[v_filter] Using cached vertical filtered audio")
                 else:
@@ -1079,7 +1132,7 @@ def run_shorts_season(
                          f"{', '.join(set(v_censored))}"
                          if v_censored else "Done — no profanity detected")
             elif filter_audio and export_only:
-                if os.path.exists(paths["vertical_filtered"]):
+                if valid_intermediate(paths["vertical_filtered"], "wav"):
                     v_transcript, _ = censor_transcript(v_transcript)
                     print(f"[v_filter] Skipped (resuming) — using {paths['vertical_filtered']}")
                 else:
@@ -1097,7 +1150,7 @@ def run_shorts_season(
 
             v_audio_path = (
                 paths["vertical_filtered"]
-                if filter_audio and os.path.exists(paths["vertical_filtered"])
+                if filter_audio and valid_intermediate(paths["vertical_filtered"], "wav")
                 else paths["vertical_clean"]
             )
 
@@ -1311,12 +1364,8 @@ def run_shorts_season(
                     print(f"  [clip_desc] Warning: {e}")
 
                 # QA
-                qa_issues, qa_warnings = validate_clip(
-                    clip_path        = clip_files.get("social") or clip_files.get("youtube", ""),
-                    start            = start,
-                    end              = end,
-                    title            = title_str,
-                    transcript_words = clip_transcript["words"],
+                qa_issues, qa_warnings = _validate_clip_variants(
+                    clip_files, start, end, title_str, clip_transcript["words"],
                 )
                 print(format_validation(qa_issues, qa_warnings, title_str))
 

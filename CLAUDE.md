@@ -26,6 +26,31 @@
 - `find_clips()` is optional and requires `ANTHROPIC_API_KEY` in `.env`
 - `clean_audio()` outputs a 48kHz WAV — DeepFilterNet3 requirement; do not change sample rate
 
+## Tests
+
+- `tests/` is pure-Python pytest — no network, no real ffmpeg, no GPU. Run with:
+  `.venv312\Scripts\python.exe -m pytest tests -q`
+- Queue tests use the `queue_paths` conftest fixture (repoints the queue at tmp_path) —
+  never let a test touch `output/publish_queue.json`
+
+## QA Gate (pre-publish validation)
+
+- `pipeline/validate.py` is the QA hub: `QA_PROFILES` (clip = portrait ≤180s hard cap,
+  62s perf warning; episode = landscape probe-only), `validate_media()` (deep=True adds a
+  one-pass blackdetect+volumedetect+truncation decode), `quick_probe_check()` (cheap ffprobe
+  for daemon pre-flight/resume), `valid_intermediate()` (resume-time file integrity)
+- **Issues BLOCK scheduling; warnings don't.** `schedule_episode_clips`, `schedule_clip`,
+  `publish_clip_now` refuse on QA issues unless `force=True`. `schedule_episode_clips`
+  also supports `dry_run=True` (full report, zero side effects)
+- StreamYard MARS vertical = 720x1280 — that's normal, not a defect (quality floor, not target)
+- Truncated-but-probe-clean files (intact faststart moov, missing data) are only caught by
+  the deep decode pass — that's why the one-off schedulers use `deep=True`
+- Manual QA CLI: `.venv312\Scripts\python.exe -m pipeline.validate <file-or-dir> [--profile clip|episode] [--quick]`
+- `_run_ffmpeg()` verifies output exists/size (and probes intermediates reused on resume) —
+  pass `expected_output=` on any new call site
+- Resume branches use `valid_intermediate()`, not `os.path.exists()` — invalid intermediates
+  regenerate instead of silently poisoning later steps
+
 ## Three-Layer Content Strategy (Shorts Season)
 
 Every `run_shorts_season()` run produces three layers of output from a single recording session:
@@ -123,11 +148,29 @@ every 15 min) handle uploads. Hard-won rules — violate these and posts silentl
   only failed platforms). To force a re-upload of an already-`ok` platform (e.g. wrong channel), clear
   that platform's result and set status `pending` — never blanket-reset `results={}` (re-posts the
   successful platforms too).
-- **TikTok (`ilb`) is unconfigured** — uploads fail until `setup_credentials.py --platform tiktok
-  --channel ilb`. Unaudited apps must post `privacy_level=SELF_ONLY` (default `PUBLIC_TO_EVERYONE`
-  is rejected); flip to public in-app afterward.
+- **TikTok (`ilb`) needs its own account auth.** The Is Love Blind? TikTok is a **separate account**
+  from `neilbound` — same wrong-account trap as YouTube. Log the browser into the *Is Love Blind?*
+  TikTok ONLY, then run `setup_credentials.py --platform tiktok --channel ilb` (writes `ILB_TIKTOK_*`).
+  `neilbound` already has `NEILBOUND_TIKTOK_*`; do not reuse it for `ilb` content.
+- **TikTok uploads to drafts (inbox) by default.** `upload_tiktok` has two modes, resolved from the
+  `post_mode` arg then `{CHANNEL}_TIKTOK_POST_MODE` / `TIKTOK_POST_MODE`, default `"inbox"`:
+  - `"inbox"` (scope `video.upload`): lands the clip in the TikTok app's drafts. The operator opens
+    TikTok and taps Post to publish. No audit, no domain verification. The daemon marks the platform
+    `ok` once uploaded, but the video is NOT live until the manual tap. This is the working default.
+  - `"direct"` (scope `video.publish`): Direct Post at `privacy_level` (default `SELF_ONLY`; unaudited
+    apps may only post private). Requires Direct Post + `neilbound.me` domain verification on the app.
+    A `creator_info/query` preflight fails fast if the privacy level isn't available.
+  Setup auths the `video.upload` scope (`setup_credentials.py`). To switch to direct posting later,
+  enable Direct Post on the app, re-auth with `video.publish`, and set `ILB_TIKTOK_POST_MODE=direct`.
 - **Use the venv python** for any queue/credential script — `filelock`, `dotenv`, google libs live
   in `.venv312`, not system Python.
+- **Daemon failure semantics:** credential/config errors (`is_fatal_error` — 401/403,
+  invalid_grant, missing creds, ValueError) are marked `fatal` and never auto-retry; fix the
+  cause then `retry_failed_clip`. Network/5xx errors keep the 4-round exponential backoff.
+- **Operator visibility:** enqueue warnings persist in each entry's `warnings` list (stdout is
+  discarded under Task Scheduler). `list_scheduled_clips` opens with a NEEDS ATTENTION section
+  (failed/partial entries, queue warnings, unposted TikTok drafts). After tapping Post on a
+  TikTok inbox upload, run `confirm_tiktok_posted(post_id)` to clear the draft reminder.
 
 ## Git
 

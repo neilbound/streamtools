@@ -73,11 +73,54 @@ def _description_filter(description: str, font_basename: str) -> str:
     return f"{bar},{text}"
 
 
-def _run_ffmpeg(cmd: list[str], cwd: str | None = None) -> None:
-    """Run an FFmpeg command list, raising RuntimeError with stderr on failure."""
+def _run_ffmpeg(
+    cmd: list[str],
+    cwd: str | None = None,
+    expected_output: str | None = None,
+    min_bytes: int = 10_000,
+    probe_output: bool = False,
+) -> None:
+    """
+    Run an FFmpeg command list, raising RuntimeError with stderr on failure.
+
+    If expected_output is given, also verify the output file exists and is at
+    least min_bytes — FFmpeg can exit 0 after writing a truncated file (disk
+    full, NVENC session errors). With probe_output=True, additionally ffprobe
+    the file and require a video stream; use for intermediates that are reused
+    on resume, where a corrupt file would silently poison later steps.
+    """
     result = subprocess.run(cmd, capture_output=True, cwd=cwd)
+    stderr = result.stderr.decode(errors="replace")
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed:\n{result.stderr.decode(errors='replace')}")
+        raise RuntimeError(f"FFmpeg failed:\n{stderr}")
+
+    if expected_output is not None:
+        if not os.path.exists(expected_output):
+            raise RuntimeError(
+                f"FFmpeg exited 0 but produced no output file: {expected_output}\n"
+                f"stderr tail:\n{stderr[-2000:]}"
+            )
+        size = os.path.getsize(expected_output)
+        if size < min_bytes:
+            raise RuntimeError(
+                f"FFmpeg exited 0 but output is only {size} bytes "
+                f"(< {min_bytes}): {expected_output}\n"
+                f"stderr tail:\n{stderr[-2000:]}"
+            )
+        if probe_output:
+            try:
+                probe = ffmpeg.probe(expected_output)
+                streams = probe.get("streams", [])
+                if not any(s.get("codec_type") == "video" for s in streams):
+                    raise RuntimeError(
+                        f"FFmpeg output has no video stream: {expected_output}"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"FFmpeg output failed probe ({exc}): {expected_output}"
+                )
 
 
 def export_clip(
@@ -129,7 +172,7 @@ def export_clip(
                 "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
                 "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
                 output_path]
-        _run_ffmpeg(cmd, cwd=tmp_dir)
+        _run_ffmpeg(cmd, cwd=tmp_dir, expected_output=output_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -162,7 +205,7 @@ def export_clip_clean(
     cmd += ["-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
             "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
             output_path]
-    _run_ffmpeg(cmd)
+    _run_ffmpeg(cmd, expected_output=output_path)
 
     return output_path
 
@@ -230,7 +273,9 @@ def compose_portrait(
         "-movflags", "+faststart",
         output_path,
     ]
-    _run_ffmpeg(cmd)
+    # probe_output: this NVENC intermediate is reused on resume — a corrupt
+    # file here silently poisons every later step.
+    _run_ffmpeg(cmd, expected_output=output_path, probe_output=True)
     return output_path
 
 
@@ -269,7 +314,7 @@ def export_episode_youtube(
         "-movflags", "+faststart",
         output_path,
     ]
-    _run_ffmpeg(cmd)
+    _run_ffmpeg(cmd, expected_output=output_path)
     return output_path
 
 
@@ -318,7 +363,9 @@ def stitch_segments(
             "-movflags", "+faststart",
             output_path,
         ]
-        _run_ffmpeg(cmd)
+        # probe_output: stream-copy concat is the classic silent-corruption
+        # case, and the stitched file is reused on resume.
+        _run_ffmpeg(cmd, expected_output=output_path, probe_output=True)
     finally:
         if os.path.exists(list_path):
             os.remove(list_path)

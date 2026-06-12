@@ -62,12 +62,17 @@ def _episode_system_prompt(brand: dict) -> str:
     signature = build_signature_block(brand)
     return f"""You are the content writer for {show}. You write compelling, emotionally intelligent episode descriptions that match the show's voice: warm but direct, culturally aware, and never over-produced.
 
-VOICE AND STYLE RULES — follow these without exception:
+HARD LENGTH LIMIT - the entire output, every section combined including the signature block, MUST be under 4000 characters. This is a Spotify paste limit and is non-negotiable. Aim for 3000 to 3800 characters. If you are running long, cut adjectives and tighten the deep dive, never drop the signature block.
+
+VOICE AND STYLE RULES - follow these without exception:
+- No em dashes or en dashes anywhere. Use a comma, a period, or parentheses instead. This is the single most common AI tell, so never use one.
 - No emojis in any body copy, titles, or bullet points. The signature block platform links are the only exception.
 - No exclamation points. If something is worth saying, the words carry it.
-- No AI-typical phrases: "dive deep", "unpack", "masterclass", "game-changer", "it's clear that", "join us as", "in this episode we explore".
+- No AI-typical phrases: "dive deep", "unpack", "masterclass", "game-changer", "it's clear that", "join us as", "in this episode we explore", "delve", "tapestry", "testament to", "not only... but also".
+- Keep it simple. Short, plain sentences. One idea per sentence. Do not stack clauses or reach for a fancier word when a common one works.
 - No hype language or hollow enthusiasm. Specific and direct beats vague and warm.
 - Write like a sharp human, not a content calendar.
+- The numbered section labels below (1, 2, 3) are scaffolding for you. Do NOT print them in the final copy. Never write "THE STANDARD SIGNATURE BLOCK", "THE HOOK TITLE TRIO", or "THE DESCRIPTION" in the output.
 
 Your output must follow this EXACT structure — no deviations, no extra sections:
 
@@ -85,7 +90,7 @@ The Hook:
 The Deep Dive:
 [2 rich paragraphs expanding on both hosts' perspectives. Name the hosts specifically. Capture the emotional texture — what they said AND what it meant. Do not summarise blandly.]
 
-The Highlights — Must-Hear Moments:
+Must-Hear Moments:
 [4-5 bullet points. Each bullet = a memorable, specific moment from the episode — a direct quote or a vivid, specific description of what happened — followed by one sentence of context. No emojis.]
 
 3. THE STANDARD SIGNATURE BLOCK
@@ -94,7 +99,7 @@ The Highlights — Must-Hear Moments:
 Have a dating story or a question for the next episode? Drop it in the comments below.
 ---
 
-Tone: Conversational but thoughtful. Emotionally specific. Never corporate. Use em dashes and the hosts' actual names."""
+Tone: Conversational but thoughtful. Emotionally specific. Never corporate. Use the hosts' actual names. Remember: no em dashes, keep sentences plain and short."""
 
 
 def _shorts_system_prompt(brand: dict) -> str:
@@ -115,11 +120,13 @@ def _shorts_system_prompt(brand: dict) -> str:
 
 You will receive the clip transcript and episode context. Generate THREE pieces of copy.
 
-VOICE AND STYLE RULES — follow these without exception:
+VOICE AND STYLE RULES - follow these without exception:
+- No em dashes or en dashes anywhere. Use a comma, a period, or parentheses instead. This is the single most common AI tell.
 - No emojis anywhere. None. Not in hashtags, not in captions, not in follow lines.
 - No exclamation points. If something is worth saying, the words carry it.
 - No markdown formatting. No asterisks (**), no underscores for emphasis, no bold, no italics. Plain text only.
-- No AI-typical phrases: "dive deep", "unpack", "masterclass", "game-changer", "it's clear that", "let's explore", "in today's episode".
+- No AI-typical phrases: "dive deep", "unpack", "masterclass", "game-changer", "it's clear that", "let's explore", "in today's episode", "delve", "testament to".
+- Keep it simple. Short, plain sentences. One idea per sentence. Do not reach for a fancier word when a common one works.
 - No hype or performative enthusiasm. Direct, confident, and specific.
 - Write like a sharp human, not a content calendar.
 - Questions to drive comments should feel like genuine curiosity, not a CTA template.
@@ -138,7 +145,7 @@ TIKTOK:
 [Single punchy caption under 150 chars. Conversational, curiosity-driven. Include 3-5 hashtags.]
 
 INSTAGRAM:
-[Caption with an engaging opening line, 2-3 sentences of context, a question to drive comments, then 8-12 relevant hashtags on a new line. End with "Full episode on YouTube — link in bio."]
+[Caption with an engaging opening line, 2-3 sentences of context, a question to drive comments, then 8-12 relevant hashtags on a new line. End with "Full episode on YouTube, link in bio."]
 ---
 
 Output ONLY the three labelled blocks above. No intro, no commentary. No markdown. Plain text only."""
@@ -233,12 +240,22 @@ Write the complete description package for this episode."""
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    # Extract the three title options from the trio section
+    # Extract the three title options from the trio section (before we strip it).
     title_options = _extract_title_options(full_text)
     signature = build_signature_block(brand)
 
+    # The pasteable block is description + signature only. The title trio is
+    # scaffolding for picking a title and lives in show notes, not the description.
+    pasteable = _split_episode_output(full_text)
+
+    # Spotify paste limit: the description block must stay under 4000 chars.
+    SPOTIFY_LIMIT = 4000
+    if len(pasteable) >= SPOTIFY_LIMIT:
+        print(f"[describe] WARNING: episode description is {len(pasteable)} chars, "
+              f"over the {SPOTIFY_LIMIT}-char Spotify limit. Trim before pasting.")
+
     return {
-        "youtube_full":   full_text,
+        "youtube_full":   pasteable,
         "title_options":  title_options,
         "signature_block": signature,
     }
@@ -300,7 +317,44 @@ Write the YouTube Short, TikTok, and Instagram descriptions for this clip."""
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    return _parse_shorts_output(raw)
+    parsed = _parse_shorts_output(raw)
+
+    # If Claude skipped a labelled section, retry once with a stern reminder
+    # before falling back — an empty platform caption otherwise ships silently.
+    missing = _empty_sections(parsed)
+    if missing:
+        print(f"[describe] WARNING: missing section(s) {missing} for "
+              f"{clip_title!r} — retrying once")
+        raw = _call_with_retry(
+            client,
+            model="claude-opus-4-6",
+            max_tokens=1000,
+            system=system,
+            messages=[{"role": "user", "content": user_prompt + (
+                "\n\nIMPORTANT: Output ALL THREE labelled blocks "
+                "(YOUTUBE_SHORT:, TIKTOK:, INSTAGRAM:) — your previous "
+                "attempt omitted one or more."
+            )}],
+        )
+        parsed = _parse_shorts_output(raw)
+        missing = _empty_sections(parsed)
+
+    if missing:
+        fallback = next(
+            (parsed[k] for k in ("youtube_short", "tiktok", "instagram") if parsed.get(k)),
+            clip_title,
+        )
+        warnings = []
+        for key in missing:
+            parsed[key] = fallback
+            warnings.append(
+                f"{key.upper()} section missing from Claude output — "
+                f"fell back to copy from another platform; review before posting"
+            )
+            print(f"[describe] WARNING: {warnings[-1]}")
+        parsed["_warnings"] = warnings
+
+    return parsed
 
 
 # ── Output parsers ─────────────────────────────────────────────────────────────
@@ -324,6 +378,24 @@ def _strip_markdown(text: str) -> str:
     text = re.sub(r"^\*+\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"\s*\*+$", "", text, flags=re.MULTILINE)
     return text.strip()
+
+
+def _split_episode_output(full_text: str) -> str:
+    """
+    Return only the pasteable description block: the hook through the signature.
+
+    Drops the title-trio scaffolding (everything before the hook) and the
+    "The Hook:" / "The Deep Dive:" sub-labels so the published copy reads cleanly.
+    Falls back to the full text if the expected markers are missing.
+    """
+    body = full_text
+    if "The Hook:" in body:
+        body = body.split("The Hook:", 1)[1].lstrip()
+    body = body.replace("The Deep Dive:", "")
+    # Collapse any blank-line gaps the removed labels left behind.
+    while "\n\n\n" in body:
+        body = body.replace("\n\n\n", "\n\n")
+    return body.strip()
 
 
 def _extract_title_options(description_text: str) -> list[str]:
@@ -373,3 +445,11 @@ def _parse_shorts_output(raw: str) -> dict:
         result[key] = _strip_markdown(after.strip())
 
     return result
+
+
+def _empty_sections(parsed: dict) -> list[str]:
+    """Return the platform keys whose generated copy came back empty."""
+    return [
+        key for key in ("youtube_short", "tiktok", "instagram")
+        if not (parsed.get(key) or "").strip()
+    ]

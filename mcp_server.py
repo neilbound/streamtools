@@ -524,12 +524,16 @@ def schedule_clip(
     scheduled_time: str = "",
     tags: list[str] = [],
     channel: str = "neilbound",
+    force: bool = False,
 ) -> str:
     """
     Add a clip to the publish queue for scheduled delivery to social platforms.
 
     The publisher daemon (publisher_daemon.py) runs every 15 minutes via Windows Task
     Scheduler and will upload the clip when the scheduled_time is reached.
+
+    The clip is QA-checked (probe: streams, codec, aspect, duration) before
+    queueing; QA issues block scheduling unless force=True.
 
     Args:
         clip_path:      Absolute path to the exported MP4 clip.
@@ -540,12 +544,25 @@ def schedule_clip(
                         If empty, schedules for now (uploaded at next daemon run).
         tags:           Optional hashtag strings (without '#').
         channel:        Publishing channel: "neilbound" or "ilb". Default "neilbound".
+        force:          Schedule even if QA checks find issues.
 
     Returns:
-        Confirmation message with the assigned post_id.
+        Confirmation message with the assigned post_id, or a QA refusal.
     """
-    from pipeline.publish_queue import enqueue
+    from pipeline.publish_queue import enqueue, get_entry
+    from pipeline.validate import validate_media
     from datetime import datetime, timezone
+
+    # deep=True: arbitrary paths have no stored export-time QA, and truncation
+    # (intact moov header, missing data) is only detectable by the decode pass.
+    # Costs ~2s for a <62s clip.
+    qa_issues, qa_warnings = validate_media(clip_path, profile="clip", deep=True)
+    if qa_issues and not force:
+        lines = [f"NOT scheduled — QA found {len(qa_issues)} issue(s) with {clip_path}:"]
+        lines += [f"  [ERROR] {i}" for i in qa_issues]
+        lines += [f"  [WARNING] {w}" for w in qa_warnings]
+        lines.append("Fix and re-export, or re-run with force=True to schedule anyway.")
+        return "\n".join(lines)
 
     if not scheduled_time:
         scheduled_time = datetime.now(tz=timezone.utc).isoformat()
@@ -558,17 +575,27 @@ def schedule_clip(
         scheduled_time_iso=scheduled_time,
         tags=tags or [],
         channel=channel,
+        extra={"expected_orientation": "portrait"},
     )
 
-    return (
-        f"Queued for publishing.\n"
-        f"post_id   : {post_id}\n"
-        f"Platforms : {', '.join(platforms)}\n"
-        f"Scheduled : {scheduled_time}\n"
-        f"Title     : {title}\n\n"
-        f"The daemon will upload this at or after the scheduled time.\n"
-        f"Use list_scheduled_clips to check status or cancel_scheduled_clip to remove it."
-    )
+    lines = [
+        f"Queued for publishing.",
+        f"post_id   : {post_id}",
+        f"Platforms : {', '.join(platforms)}",
+        f"Scheduled : {scheduled_time}",
+        f"Title     : {title}",
+    ]
+    if qa_issues:
+        lines.append(f"QA OVERRIDDEN (force=True) — {len(qa_issues)} issue(s): " + "; ".join(qa_issues))
+    for w in qa_warnings:
+        lines.append(f"QA warning: {w}")
+    entry = get_entry(post_id)
+    for w in (entry or {}).get("warnings", []):
+        lines.append(f"Queue warning: {w}")
+    lines.append("")
+    lines.append("The daemon will upload this at or after the scheduled time.")
+    lines.append("Use list_scheduled_clips to check status or cancel_scheduled_clip to remove it.")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -579,6 +606,7 @@ def publish_clip_now(
     description: str = "",
     tags: list[str] = [],
     channel: str = "neilbound",
+    force: bool = False,
 ) -> str:
     """
     Upload and publish a clip immediately to one or more social platforms.
@@ -587,6 +615,9 @@ def publish_clip_now(
     30-120 seconds depending on file size and platform. Requires PUBLISHING_ENABLED=true
     and valid credentials in .env.
 
+    The clip is QA-checked (probe: streams, codec, aspect, duration) first;
+    QA issues block the upload unless force=True.
+
     Args:
         clip_path:   Absolute path to the exported MP4 clip.
         platforms:   List of target platforms: "youtube", "tiktok", "instagram".
@@ -594,12 +625,24 @@ def publish_clip_now(
         description: Longer description (used by YouTube; optional for others).
         tags:        Optional hashtag strings (without '#').
         channel:     Publishing channel: "neilbound" or "ilb". Default "neilbound".
+        force:       Publish even if QA checks find issues.
 
     Returns:
-        Per-platform results (video IDs, URLs, publish IDs).
+        Per-platform results (video IDs, URLs, publish IDs), or a QA refusal.
     """
     from pipeline.publish import upload_youtube, upload_tiktok, upload_instagram
+    from pipeline.validate import validate_media
     import traceback as _tb
+
+    # deep=True: catches truncated files that pass probe-only checks (see
+    # schedule_clip). ~2s — negligible next to a 30-120s upload.
+    qa_issues, qa_warnings = validate_media(clip_path, profile="clip", deep=True)
+    if qa_issues and not force:
+        lines = [f"NOT published — QA found {len(qa_issues)} issue(s) with {clip_path}:"]
+        lines += [f"  [ERROR] {i}" for i in qa_issues]
+        lines += [f"  [WARNING] {w}" for w in qa_warnings]
+        lines.append("Fix and re-export, or re-run with force=True to publish anyway.")
+        return "\n".join(lines)
 
     uploaders = {
         "youtube":   lambda: upload_youtube(clip_path, title, description, tags or [], channel=channel),
@@ -635,7 +678,51 @@ def list_scheduled_clips() -> str:
     if not entries:
         return "Publish queue is empty."
 
-    lines = [f"Publish queue — {len(entries)} entry(ies):\n"]
+    def _is_unposted_tiktok_draft(res: dict) -> bool:
+        return (
+            res.get("status") == "ok"
+            and res.get("requires_manual_post")
+            and not res.get("manually_posted")
+        )
+
+    # ── NEEDS ATTENTION: failures, partials, unposted TikTok drafts, warnings ──
+    attention: list[str] = []
+    for e in entries:
+        post_id = e.get("post_id", "?")
+        title   = e.get("title", "(no title)")
+        status  = e.get("status", "?")
+        results = e.get("results", {})
+
+        if status == "failed":
+            first_err = next(
+                (r.get("error", "?") for r in results.values()
+                 if r.get("status") == "error"), "?")
+            attention.append(f"  FAILED: {title} ({post_id}) — {first_err}")
+        elif status == "partial":
+            pending_pl = [p for p in e.get("platforms", [])
+                          if results.get(p, {}).get("status") != "ok"]
+            attention.append(
+                f"  PARTIAL: {title} ({post_id}) — still pending/failed: "
+                f"{', '.join(pending_pl)}")
+
+        tiktok_res = results.get("tiktok", {})
+        if _is_unposted_tiktok_draft(tiktok_res):
+            attention.append(
+                f"  TIKTOK DRAFT: {title} ({post_id}) — uploaded to drafts; "
+                f"open the TikTok app and tap Post, then run "
+                f"confirm_tiktok_posted('{post_id}')")
+
+        for w in e.get("warnings", []):
+            attention.append(f"  WARNING: {title} ({post_id}) — {w}")
+
+    lines = ["=== NEEDS ATTENTION ==="]
+    if attention:
+        lines.extend(attention)
+    else:
+        lines.append("  Nothing needs attention.")
+    lines.append("")
+
+    lines.append(f"Publish queue — {len(entries)} entry(ies):\n")
     for e in entries:
         status    = e.get("status", "?")
         post_id   = e.get("post_id", "?")
@@ -654,11 +741,19 @@ def list_scheduled_clips() -> str:
         results = e.get("results", {})
         if results:
             for platform, res in results.items():
-                if res.get("status") == "ok":
+                if platform == "tiktok" and _is_unposted_tiktok_draft(res):
+                    lines.append(
+                        f"    tiktok: UPLOADED TO DRAFTS — needs manual post in app "
+                        f"({res.get('publish_id', '')})")
+                elif res.get("status") == "ok":
                     url = res.get("url") or res.get("publish_id") or res.get("media_id", "")
-                    lines.append(f"    {platform}: OK ({url})")
+                    posted_note = " (manually posted)" if res.get("manually_posted") else ""
+                    lines.append(f"    {platform}: OK ({url}){posted_note}")
                 else:
-                    lines.append(f"    {platform}: ERROR — {res.get('error', '?')}")
+                    fatal_note = " [FATAL — no auto-retry; use retry_failed_clip]" if res.get("fatal") else ""
+                    lines.append(f"    {platform}: ERROR{fatal_note} — {res.get('error', '?')}")
+        for w in e.get("warnings", []):
+            lines.append(f"    warning: {w}")
         lines.append("")
 
     return "\n".join(lines).rstrip()
@@ -725,6 +820,36 @@ def retry_failed_clip(post_id: str) -> str:
         f"Nothing to retry for post {post_id}. "
         "Either the post_id was not found, or every platform already succeeded. "
         "Use list_scheduled_clips to check the current status."
+    )
+
+
+@mcp.tool()
+def confirm_tiktok_posted(post_id: str) -> str:
+    """
+    Record that a TikTok inbox upload has been manually posted in the app.
+
+    TikTok "inbox" mode uploads land in the account's drafts and the operator
+    must open the TikTok app and tap Post. The queue marks the upload "ok" but
+    keeps a reminder in list_scheduled_clips' NEEDS ATTENTION section until
+    this tool confirms the post actually went live.
+
+    Args:
+        post_id: The 8-character post identifier (from list_scheduled_clips).
+
+    Returns:
+        Confirmation or an explanation if the post wasn't a TikTok draft.
+    """
+    from pipeline.publish_queue import confirm_manual_post
+
+    if confirm_manual_post(post_id, "tiktok"):
+        return (
+            f"Recorded: TikTok draft for post {post_id} was manually posted. "
+            f"The reminder is cleared from NEEDS ATTENTION."
+        )
+    return (
+        f"Could not confirm post {post_id}. Either the post_id was not found, "
+        f"or its TikTok result was not an inbox/draft upload. "
+        f"Use list_scheduled_clips to check."
     )
 
 
@@ -1239,10 +1364,28 @@ def review_episode_clips(episode_dir_path: str) -> str:
         if clip.get("youtube"):
             lines.append(f"    youtube: {clip['youtube']}")
 
+        # QA results from the export run — this is what the scheduling gate
+        # will enforce, so surface it here where edits are decided.
+        qa_issues   = clip.get("qa_issues") or []
+        qa_warnings = clip.get("qa_warnings") or []
+        if qa_issues:
+            lines.append("    QA: FAIL — will be BLOCKED at scheduling (unless force=True)")
+            for issue in qa_issues:
+                lines.append(f"      [ERROR]   {issue}")
+        elif qa_warnings:
+            lines.append("    QA: WARN")
+        else:
+            lines.append("    QA: PASS")
+        for warning in qa_warnings:
+            lines.append(f"      [WARNING] {warning}")
+
         # Load descriptions
         if desc_path and os.path.exists(desc_path):
             with open(desc_path, "r", encoding="utf-8") as f:
                 descs = json.load(f)
+
+            for w in descs.get("_warnings", []):
+                lines.append(f"    [DESCRIPTION WARNING] {w}")
 
             lines.append("\n    ── YouTube Shorts ──")
             lines.append(f"    {descs.get('youtube_short', '(none)')}")
@@ -1273,6 +1416,8 @@ def schedule_episode_clips(
     description_overrides: dict = {},
     start_date: str = "",
     day_interval: int = 1,
+    force: bool = False,
+    dry_run: bool = False,
 ) -> str:
     """
     Schedule all clips from a completed broadcast episode at optimal posting times.
@@ -1281,6 +1426,9 @@ def schedule_episode_clips(
     Call review_episode_clips first to see descriptions and request any edits,
     then pass those edits via description_overrides.
 
+    QA GATE: clips whose pipeline QA found issues (qa_issues), or that fail a
+    fresh probe check, are SKIPPED unless force=True. QA warnings never block.
+
     Optimal posting times rotate through 12pm, 6pm, and 9am EST to avoid
     looking automated.
 
@@ -1288,17 +1436,20 @@ def schedule_episode_clips(
         episode_dir_path:      Path to the episode root directory.
         channel:               Publishing channel: "neilbound" or "ilb". Default "neilbound".
         platforms:             List of platforms to post to. Default all three.
-                               TikTok will be queued but may fail until app review is complete.
         description_overrides: Optional per-clip description edits keyed by slug:
                                { "slug": { "youtube_short": "...", "tiktok": "...", "instagram": "..." } }
         start_date:            ISO date (YYYY-MM-DD) for the first post. Defaults to today.
         day_interval:          Days between each post. Default 1 (daily). Use 2 for every other day.
+        force:                 Schedule clips even if QA found issues.
+        dry_run:               Report what would be scheduled (slots, blocked clips,
+                               warnings) WITHOUT enqueueing or writing the checklist.
 
     Returns:
         Summary of scheduled posts with dates, times, and platforms.
     """
     from pipeline.episode import read_status
-    from pipeline.publish_queue import enqueue
+    from pipeline.publish_queue import enqueue, get_entry
+    from pipeline.validate import quick_probe_check
     from datetime import date, datetime, timedelta, timezone
     import config as _cfg
     _cfg_data = _cfg.load()
@@ -1336,23 +1487,16 @@ def schedule_episode_clips(
     else:
         post_date = date.today()
 
+    mode_note = " (DRY RUN — nothing will be queued)" if dry_run else ""
     lines = [
-        f"Scheduling {len(exported)} clip(s) for channel '{channel}'",
+        f"Scheduling {len(exported)} clip(s) for channel '{channel}'{mode_note}",
         f"Platforms : {', '.join(platforms)}",
         f"Starting  : {post_date.isoformat()}",
         "",
     ]
 
-    # QA gate — warn about any clips with validation issues
-    qa_blocked = [c for c in exported if c.get("qa_issues")]
-    if qa_blocked:
-        lines.append("QA WARNINGS — the following clips have issues:")
-        for c in qa_blocked:
-            for issue in c["qa_issues"]:
-                lines.append(f"  [{c.get('slug','?')}] {issue}")
-        lines.append("  These clips will still be scheduled — review before the upload time.\n")
-
     scheduled_clips = []   # collected for checklist generation
+    blocked_clips   = []   # QA-blocked (skipped) clips for the summary
 
     for i, clip in enumerate(exported):
         title = clip.get("title", f"clip_{i+1}")
@@ -1366,6 +1510,34 @@ def schedule_episode_clips(
             lines.append(f"  [{i+1}] SKIPPED — clip file not found: {clip_path}")
             post_date += timedelta(days=day_interval)
             continue
+
+        # ── QA gate ────────────────────────────────────────────────────────
+        # Stored QA from export time, plus a fresh probe (the file may have
+        # been corrupted or replaced since the pipeline ran).
+        # Legacy translation: older pipeline runs stored ">62s" duration as a
+        # blocking issue; current policy only blocks past the 180s platform
+        # cap (62s is a performance warning). Don't block on the stale rule.
+        import re as _qre
+        from pipeline.validate import QA_PROFILES as _qa_profiles
+        _platform_cap = _qa_profiles["clip"]["max_duration"]
+        gate_issues = []
+        for issue in (clip.get("qa_issues") or []):
+            m = _qre.match(r"DURATION: (\d+(?:\.\d+)?)s exceeds", issue)
+            if m and float(m.group(1)) <= _platform_cap:
+                continue   # legacy 62s rule — a warning under current policy
+            gate_issues.append(issue)
+        probe_err = quick_probe_check(clip_path, "portrait")
+        if probe_err:
+            gate_issues.append(f"PROBE: {probe_err}")
+        if gate_issues and not force:
+            blocked_clips.append((title, gate_issues))
+            lines.append(f"  [{i+1}] BLOCKED by QA — {title}")
+            for issue in gate_issues:
+                lines.append(f"       [ERROR] {issue}")
+            post_date += timedelta(days=day_interval)
+            continue
+        if gate_issues and force:
+            lines.append(f"  [{i+1}] QA OVERRIDDEN (force=True) — {title}: {'; '.join(gate_issues)}")
 
         # Load base descriptions
         desc_path = clip.get("descriptions", "")
@@ -1394,21 +1566,31 @@ def schedule_episode_clips(
         # Enqueue with per-platform caption as description
         # The publisher daemon uses title for TikTok/Instagram caption and
         # description for YouTube — we pass the platform-appropriate text.
-        post_id = enqueue(
-            clip_path=social_path or youtube_path,
-            platforms=platforms,
-            title=yt_title,
-            description=ig_cap,        # stored for Instagram
-            scheduled_time_iso=sched_iso,
-            tags=[],
-            channel=channel,
-            extra={
-                "tiktok_caption":    tiktok_cap,
-                "instagram_caption": ig_cap,
-                "youtube_path":      youtube_path,
-                "playlist_id":       _brand.get("youtube_playlist_shorts", ""),
-            },
-        )
+        entry_warnings: list[str] = []
+        if dry_run:
+            post_id = "(dry-run)"
+        else:
+            post_id = enqueue(
+                clip_path=social_path or youtube_path,
+                platforms=platforms,
+                title=yt_title,
+                description=ig_cap,        # stored for Instagram
+                scheduled_time_iso=sched_iso,
+                tags=[],
+                channel=channel,
+                extra={
+                    "tiktok_caption":       tiktok_cap,
+                    "instagram_caption":    ig_cap,
+                    "youtube_path":         youtube_path,
+                    "playlist_id":          _brand.get("youtube_playlist_shorts", ""),
+                    "expected_orientation": "portrait",
+                },
+            )
+            entry_warnings = (get_entry(post_id) or {}).get("warnings", [])
+
+        # Description-generation warnings (e.g. a platform section Claude
+        # failed to produce) ride along in the descriptions JSON.
+        desc_warnings = descs.get("_warnings", [])
 
         # Convert UTC hour → EDT (UTC-4) 12-hour label for any configured slot
         _est_hour = (hour_utc - 4) % 24
@@ -1439,8 +1621,26 @@ def schedule_episode_clips(
             f"       date     : {post_date.isoformat()} at {local_time_label}\n"
             f"       clip     : {os.path.basename(clip_path)}"
         )
+        for w in entry_warnings:
+            lines.append(f"       warning  : {w}")
+        for w in desc_warnings:
+            lines.append(f"       warning  : {w}")
 
         post_date += timedelta(days=day_interval)
+
+    if blocked_clips:
+        lines.append("")
+        lines.append(f"{len(blocked_clips)} clip(s) were BLOCKED by QA and NOT scheduled:")
+        for title, issues in blocked_clips:
+            lines.append(f"  - {title}: {'; '.join(issues)}")
+        lines.append("Fix and re-export, or re-run with force=True to schedule anyway.")
+
+    if dry_run:
+        lines.append(
+            "\nDRY RUN complete — nothing was queued and no checklist was written.\n"
+            "Re-run with dry_run=False to schedule."
+        )
+        return "\n".join(lines)
 
     lines.append(
         "\nAll clips queued. The publisher daemon will upload each at its scheduled time.\n"

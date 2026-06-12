@@ -452,13 +452,14 @@ def upload_tiktok(
     clip_path: str,
     title: str,
     tags: list[str] | None = None,
-    privacy_level: str = "PUBLIC_TO_EVERYONE",
+    privacy_level: str = "",
     disable_duet: bool = False,
     disable_comment: bool = False,
     disable_stitch: bool = False,
     brand_content: bool = False,
     brand_organic: bool = False,
     channel: str = "neilbound",
+    post_mode: str = "",
 ) -> dict:
     """
     Upload a short MP4 clip to TikTok using the Content Posting API v2.
@@ -466,19 +467,33 @@ def upload_tiktok(
     TikTok does not support native scheduling — use the publish queue to time delivery.
     Refreshes the access token automatically before upload.
 
+    Two posting modes (resolved from post_mode arg, then {CHANNEL}_TIKTOK_POST_MODE /
+    TIKTOK_POST_MODE env, defaulting to "inbox"):
+      - "inbox":  upload to the user's TikTok drafts (scope video.upload). The clip
+                  lands in the TikTok app inbox and the user taps Post to publish.
+                  No audit, no domain verification, no privacy level. Caption is added
+                  in-app, so title/tags/privacy are ignored here.
+      - "direct": Direct Post (scope video.publish). Posts immediately at privacy_level.
+                  Unaudited apps may only use SELF_ONLY; needs Direct Post + domain
+                  verification configured on the TikTok app.
+
     Args:
         clip_path:       Absolute path to the MP4 file.
-        title:           Post caption (max 2200 chars). Hashtags appended from tags.
-        tags:            Optional hashtag strings (without '#'). Appended to caption.
-        privacy_level:   "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", or "SELF_ONLY".
-        disable_duet:    Prevent other users from duetting this video.
-        disable_comment: Disable comments on this video.
-        disable_stitch:  Prevent other users from stitching this video.
-        brand_content:   True if this is paid/sponsored branded content (required by TikTok).
-        brand_organic:   True if this organically promotes a brand/product you are affiliated with.
+        title:           Post caption (max 2200 chars). Hashtags appended from tags. (direct only)
+        tags:            Optional hashtag strings (without '#'). Appended to caption. (direct only)
+        privacy_level:   "PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", or "SELF_ONLY". (direct only)
+                         If empty, resolves to {CHANNEL}_TIKTOK_PRIVACY_LEVEL / the
+                         TIKTOK_PRIVACY_LEVEL env var, defaulting to "SELF_ONLY".
+        disable_duet:    Prevent other users from duetting this video. (direct only)
+        disable_comment: Disable comments on this video. (direct only)
+        disable_stitch:  Prevent other users from stitching this video. (direct only)
+        brand_content:   True if this is paid/sponsored branded content. (direct only)
+        brand_organic:   True if this organically promotes a brand you are affiliated with. (direct only)
+        post_mode:       "inbox" or "direct" (see above).
 
     Returns:
-        {"platform": "tiktok", "publish_id": str, "scheduled": False}
+        {"platform": "tiktok", "publish_id": str, "scheduled": False,
+         "mode": str, "requires_manual_post": bool}
     """
     _require_publishing_enabled()
 
@@ -510,6 +525,14 @@ def upload_tiktok(
             f"Run: python setup_credentials.py --platform tiktok --channel {channel}"
         )
 
+    # Resolve posting mode. Default "inbox" (upload to drafts) — works on an unaudited
+    # app with no domain verification. Override via arg or {CHANNEL}_TIKTOK_POST_MODE.
+    if not post_mode:
+        post_mode = _cred(channel, "TIKTOK_POST_MODE") or "inbox"
+    post_mode = post_mode.lower()
+    if post_mode not in ("inbox", "direct"):
+        raise ValueError(f"Unknown TikTok post_mode '{post_mode}' (use 'inbox' or 'direct').")
+
     # Refresh token before upload to avoid mid-upload expiry
     print("[TikTok] Refreshing access token...")
     try:
@@ -517,41 +540,76 @@ def upload_tiktok(
     except Exception as e:
         print(f"[TikTok] Token refresh failed, using existing token: {e}")
 
-    # Build caption with hashtags
-    caption = title
-    if tags:
-        hashtags = " ".join(f"#{t.lstrip('#')}" for t in tags)
-        caption = f"{caption} {hashtags}"
-
     video_size = os.path.getsize(clip_path)
+    auth_headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json; charset=UTF-8",
+    }
+    source_info = {
+        "source": "FILE_UPLOAD",
+        "video_size": video_size,
+        "chunk_size": video_size,   # single chunk for files ≤ 128 MB
+        "total_chunk_count": 1,
+    }
 
-    # Step 1: Init upload
-    print("[TikTok] Initialising upload...")
-    init_resp = requests.post(
-        "https://open.tiktokapis.com/v2/post/publish/video/init/",
-        json={
-            "post_info": {
-                "title": caption,
-                "privacy_level": privacy_level,
-                "disable_duet": disable_duet,
-                "disable_comment": disable_comment,
-                "disable_stitch": disable_stitch,
-                "brand_content_toggle": brand_content,
-                "brand_organic_toggle": brand_organic,
+    if post_mode == "inbox":
+        # Upload to the user's TikTok drafts/inbox. No post_info, no privacy, no audit.
+        # The user opens TikTok and taps Post to finish (adds caption there).
+        print("[TikTok] Initialising inbox upload (lands in TikTok drafts)...")
+        init_resp = requests.post(
+            "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/",
+            json={"source_info": source_info},
+            headers=auth_headers,
+            timeout=30,
+        )
+    else:
+        # Direct Post. Resolve privacy (default SELF_ONLY — the only level an unaudited
+        # app may post) and preflight creator_info to fail fast on a bad privacy level.
+        if not privacy_level:
+            privacy_level = _cred(channel, "TIKTOK_PRIVACY_LEVEL") or "SELF_ONLY"
+
+        print("[TikTok] Checking creator info...")
+        info_resp = requests.post(
+            "https://open.tiktokapis.com/v2/post/publish/creator_info/query/",
+            headers=auth_headers,
+            timeout=30,
+        )
+        info_resp.raise_for_status()
+        info_data = info_resp.json()
+        if info_data.get("error", {}).get("code", "ok") != "ok":
+            raise ValueError(f"TikTok creator_info query failed: {info_data}")
+        available = info_data.get("data", {}).get("privacy_level_options", [])
+        if available and privacy_level not in available:
+            raise ValueError(
+                f"TikTok rejects privacy_level '{privacy_level}' for channel '{channel}'. "
+                f"Available options: {available}. Unaudited apps may only post SELF_ONLY "
+                f"until the app passes TikTok's content-posting audit."
+            )
+
+        caption = title
+        if tags:
+            hashtags = " ".join(f"#{t.lstrip('#')}" for t in tags)
+            caption = f"{caption} {hashtags}"
+
+        print("[TikTok] Initialising direct post...")
+        init_resp = requests.post(
+            "https://open.tiktokapis.com/v2/post/publish/video/init/",
+            json={
+                "post_info": {
+                    "title": caption,
+                    "privacy_level": privacy_level,
+                    "disable_duet": disable_duet,
+                    "disable_comment": disable_comment,
+                    "disable_stitch": disable_stitch,
+                    "brand_content_toggle": brand_content,
+                    "brand_organic_toggle": brand_organic,
+                },
+                "source_info": source_info,
             },
-            "source_info": {
-                "source": "FILE_UPLOAD",
-                "video_size": video_size,
-                "chunk_size": video_size,   # single chunk for files ≤ 128 MB
-                "total_chunk_count": 1,
-            },
-        },
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json; charset=UTF-8",
-        },
-        timeout=30,
-    )
+            headers=auth_headers,
+            timeout=30,
+        )
+
     init_resp.raise_for_status()
     init_data = init_resp.json()
 
@@ -576,12 +634,18 @@ def upload_tiktok(
         timeout=300,  # allow up to 5 min for upload
     )
     upload_resp.raise_for_status()
-    print(f"[TikTok] Upload complete. publish_id={publish_id}")
+    if post_mode == "inbox":
+        print(f"[TikTok] Uploaded to drafts. Open TikTok and tap Post to publish. "
+              f"publish_id={publish_id}")
+    else:
+        print(f"[TikTok] Direct post complete. publish_id={publish_id}")
 
     return {
         "platform": "tiktok",
         "publish_id": publish_id,
         "scheduled": False,
+        "mode": post_mode,
+        "requires_manual_post": post_mode == "inbox",
     }
 
 

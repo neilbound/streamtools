@@ -153,6 +153,26 @@ def setup_youtube(channel: str = "NEILBOUND"):
 
 # ── TikTok OAuth setup ─────────────────────────────────────────────────────────
 
+def _find_existing_tiktok_app(exclude_channel: str = "") -> tuple[str, str, str] | None:
+    """
+    Find an already-configured TikTok app's Client Key/Secret in the environment so a
+    new channel can authorize the SAME dev app without re-entering credentials.
+
+    One TikTok dev app can be authorized by many accounts; only the OAuth (access /
+    refresh tokens) differs per account. Returns (channel_prefix, key, secret) or None.
+    """
+    exclude = (exclude_channel or "").upper()
+    for env_key, val in os.environ.items():
+        if env_key.endswith("_TIKTOK_CLIENT_KEY") and val:
+            prefix = env_key[: -len("_TIKTOK_CLIENT_KEY")]
+            if prefix == exclude:
+                continue
+            secret = os.environ.get(f"{prefix}_TIKTOK_CLIENT_SECRET", "")
+            if secret:
+                return prefix, val, secret
+    return None
+
+
 def setup_tiktok(channel: str = "NEILBOUND"):
     """
     Interactive OAuth 2.0 setup for TikTok Content Posting API v2.
@@ -167,18 +187,37 @@ def setup_tiktok(channel: str = "NEILBOUND"):
     print("Find your Client Key and Client Secret in the app dashboard.")
     print()
 
+    existing = _find_existing_tiktok_app(exclude_channel=channel)
+    if existing:
+        ref_prefix, ref_key, _ = existing
+        print(f"Found an existing TikTok app under {ref_prefix}_TIKTOK_* "
+              f"(Client Key {ref_key[:6]}...).")
+        print("Press Enter at both prompts to reuse it for this channel.")
+        print("(One dev app can be authorized by multiple TikTok accounts.)")
+        print()
+
     client_key    = input("Client Key: ").strip()
     client_secret = input("Client Secret: ").strip()
+
+    if existing:
+        ref_prefix, ref_key, ref_secret = existing
+        client_key    = client_key or ref_key
+        client_secret = client_secret or ref_secret
+        if client_key == ref_key:
+            print(f"Reusing app credentials from {ref_prefix}_TIKTOK_*.")
 
     if not client_key or not client_secret:
         print("Client Key and Client Secret are required.")
         sys.exit(1)
 
-    # Redirect URI — must be registered in TikTok app dashboard.
-    # TikTok does not support localhost; use a real domain (page doesn't need to exist —
-    # the auth code appears in the URL bar after TikTok redirects).
-    redirect_uri = "https://neilbound.me/tiktok-auth"
-    scope        = "video.publish"
+    # Redirect URI — must be registered in the TikTok app dashboard and sit under a
+    # verified URL property. TikTok does not support localhost; the page need not exist
+    # (the auth code appears in the URL bar after TikTok redirects). Override with the
+    # TIKTOK_REDIRECT_URI env var if your verified domain differs.
+    redirect_uri = os.environ.get("TIKTOK_REDIRECT_URI", "https://neilbound.com/tiktok-auth")
+    # Inbox upload (upload to TikTok drafts) needs video.upload. Direct Post needs
+    # video.publish, which requires Direct Post + domain verification on the app.
+    scope        = "video.upload"
     csrf_state   = "streamtools_setup"
 
     import base64
@@ -220,7 +259,7 @@ def setup_tiktok(channel: str = "NEILBOUND"):
     print("After authorizing, TikTok will redirect to a page that may not load.")
     print("That's fine — copy the full URL from your browser's address bar.")
     print("It will look like:")
-    print("  https://neilbound.me/tiktok-auth?code=XXXX&state=streamtools_setup")
+    print(f"  {redirect_uri}?code=XXXX&state=streamtools_setup")
     print()
 
     callback_url = input("Paste the full redirect URL here: ").strip()
