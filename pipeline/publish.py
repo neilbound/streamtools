@@ -14,6 +14,7 @@ import os
 import math
 import traceback
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 
 # ── Guard + credential helpers ─────────────────────────────────────────────────
@@ -41,6 +42,128 @@ def _cred(channel: str, key: str) -> str | None:
         if val:
             return val
     return os.environ.get(key)
+
+
+# ── YouTube self-healing helpers ───────────────────────────────────────────────
+# Two failure modes have bitten in production, both from trusting the upload result:
+#   1. Read timeout AFTER the bytes landed -> false failure (would double-post on retry)
+#   2. Truncated upload -> video stuck "processing" with duration P0D (never recovers)
+# These helpers verify a video actually landed and is intact, and recover automatically.
+
+def classify_youtube_health(item: Optional[dict]) -> str:
+    """
+    Classify a YouTube videos().list item (part=status,contentDetails,processingDetails).
+
+    Returns:
+      "ok"        — has a real (non-zero) duration; the file is intact
+      "truncated" — uploaded but duration is P0D/empty and processing failed/terminated
+      "pending"   — uploaded, no duration yet, still processing (re-check shortly)
+      "missing"   — no item (video not found)
+    """
+    if not item:
+        return "missing"
+    duration = (item.get("contentDetails") or {}).get("duration", "")
+    proc = (item.get("processingDetails") or {}).get("processingStatus", "")
+    has_real_duration = bool(duration) and duration not in ("P0D", "PT0S")
+    if has_real_duration:
+        return "ok"
+    if proc in ("failed", "terminated"):
+        return "truncated"
+    return "pending"
+
+
+def _yt_video_item(youtube, video_id: str) -> Optional[dict]:
+    r = youtube.videos().list(
+        part="status,contentDetails,processingDetails", id=video_id
+    ).execute()
+    items = r.get("items", [])
+    return items[0] if items else None
+
+
+def _yt_wait_health(youtube, video_id: str, polls: int = 4, gap: float = 5.0) -> str:
+    """
+    Poll a freshly-uploaded video's health. Healthy clips populate their duration
+    within seconds; a truncated upload stays P0D. Returns 'ok' or 'truncated'.
+    """
+    import time as _t
+    for i in range(polls):
+        health = classify_youtube_health(_yt_video_item(youtube, video_id))
+        if health == "ok":
+            return "ok"
+        if health == "truncated":
+            return "truncated"
+        if i < polls - 1:
+            _t.sleep(gap)
+    # Persistent P0D after polling — for short clips this means a truncated file.
+    return "truncated"
+
+
+def _yt_recent_uploads(youtube, limit: int = 15) -> list[dict]:
+    """Return recent uploads [{video_id, title, publishedAt}] via the uploads playlist
+    (more immediately consistent for just-uploaded videos than search())."""
+    ch = youtube.channels().list(part="contentDetails", mine=True).execute()
+    items = ch.get("items", [])
+    if not items:
+        return []
+    uploads_pl = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+    r = youtube.playlistItems().list(
+        part="snippet,contentDetails", playlistId=uploads_pl, maxResults=limit
+    ).execute()
+    out = []
+    for it in r.get("items", []):
+        sn = it.get("snippet", {})
+        out.append({
+            "video_id": it.get("contentDetails", {}).get("videoId", ""),
+            "title": sn.get("title", ""),
+            "publishedAt": sn.get("publishedAt", ""),
+        })
+    return out
+
+
+def _yt_find_recent_by_title(youtube, title: str, polls: int = 6, gap: float = 6.0) -> Optional[str]:
+    """After an upload error, poll the uploads playlist for a video matching `title`
+    to recover its id (the bytes may have landed despite the error)."""
+    import time as _t
+    for i in range(polls):
+        for u in _yt_recent_uploads(youtube):
+            if u["title"].strip() == title.strip() and u["video_id"]:
+                return u["video_id"]
+        if i < polls - 1:
+            _t.sleep(gap)
+    return None
+
+
+def _yt_delete(youtube, video_id: str) -> None:
+    try:
+        youtube.videos().delete(id=video_id).execute()
+        print(f"[YouTube] Deleted broken video {video_id}")
+    except Exception as exc:
+        print(f"[YouTube] Warning: could not delete {video_id}: {exc}")
+
+
+def _yt_add_to_playlist(youtube, playlist_id: str, video_id: str, retries: int = 3) -> bool:
+    """Add a video to a playlist, retrying transient errors (429/5xx/409 SERVICE_UNAVAILABLE)."""
+    import time as _t
+    for attempt in range(1, retries + 1):
+        try:
+            youtube.playlistItems().insert(
+                part="snippet",
+                body={"snippet": {
+                    "playlistId": playlist_id,
+                    "resourceId": {"kind": "youtube#video", "videoId": video_id},
+                }},
+            ).execute()
+            print(f"[YouTube] Added to playlist: {playlist_id}")
+            return True
+        except Exception as exc:
+            transient = any(s in str(exc) for s in ("SERVICE_UNAVAILABLE", "backendError",
+                                                    "quotaExceeded", "500", "503", "409"))
+            if transient and attempt < retries:
+                _t.sleep(2 ** attempt)
+                continue
+            print(f"[YouTube] Warning: could not add to playlist ({exc})")
+            return False
+    return False
 
 
 # ── YouTube Shorts ─────────────────────────────────────────────────────────────
@@ -168,46 +291,70 @@ def upload_youtube(
         },
     }
 
-    media = MediaFileUpload(
-        clip_path,
-        mimetype="video/mp4",
-        resumable=True,
-        chunksize=1024 * 1024 * 5,  # 5 MB chunks
-    )
+    # ── Resilient upload: recover from timeout-after-success and truncation ────
+    # Each attempt: upload -> (on error) try to recover the id from the uploads
+    # playlist -> verify the file is intact (real duration) -> delete+retry if not.
+    MAX_ATTEMPTS = 3
+    from googleapiclient.http import MediaFileUpload  # re-import safe; used per attempt
+    video_id = None
+    last_exc = None
 
-    print(f"[YouTube] Uploading: {clip_path}")
-    request = youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=media,
-    )
-
-    response = None
-    while response is None:
-        status_obj, response = request.next_chunk()
-        if status_obj:
-            pct = int(status_obj.progress() * 100)
-            print(f"[YouTube] Upload progress: {pct}%")
-
-    video_id = response["id"]
-    url = f"https://www.youtube.com/shorts/{video_id}"
-    print(f"[YouTube] Upload complete: {url}")
-
-    # Add to playlist if one is configured
-    if playlist_id:
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        clean = False
         try:
-            youtube.playlistItems().insert(
-                part="snippet",
-                body={
-                    "snippet": {
-                        "playlistId": playlist_id,
-                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
-                    }
-                },
-            ).execute()
-            print(f"[YouTube] Added to playlist: {playlist_id}")
+            media = MediaFileUpload(clip_path, mimetype="video/mp4",
+                                    resumable=True, chunksize=1024 * 1024 * 5)
+            print(f"[YouTube] Uploading (attempt {attempt}/{MAX_ATTEMPTS}): {clip_path}")
+            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+            response = None
+            while response is None:
+                status_obj, response = request.next_chunk()
+                if status_obj:
+                    print(f"[YouTube] Upload progress: {int(status_obj.progress() * 100)}%")
+            video_id = response["id"]
+            clean = True   # a completed resumable upload is intact by definition
+            print(f"[YouTube] Upload complete: {video_id}")
         except Exception as exc:
-            print(f"[YouTube] Warning: could not add to playlist ({exc})")
+            last_exc = exc
+            print(f"[YouTube] Upload errored on attempt {attempt}: {exc}")
+            # The bytes may have landed despite the error — try to recover the id
+            print("[YouTube] Checking whether the video landed anyway...")
+            video_id = _yt_find_recent_by_title(youtube, title)
+            if video_id:
+                print(f"[YouTube] Recovered uploaded video despite error: {video_id}")
+            else:
+                print("[YouTube] No matching video found — it did not land.")
+
+        if not video_id:
+            if attempt < MAX_ATTEMPTS:
+                continue
+            raise RuntimeError(
+                f"YouTube upload failed after {MAX_ATTEMPTS} attempts. Last error: {last_exc}"
+            )
+
+        # Clean uploads are trusted. Only a video recovered after an interrupted
+        # upload might be truncated — verify those with a generous window (a healthy
+        # fresh upload can read P0D for up to ~a minute while YouTube ingests it).
+        if clean:
+            break
+        health = _yt_wait_health(youtube, video_id, polls=6, gap=20.0)
+        if health == "ok":
+            break
+        print(f"[YouTube] Recovered video {video_id} is truncated — deleting and retrying")
+        _yt_delete(youtube, video_id)
+        video_id = None
+        if attempt < MAX_ATTEMPTS:
+            continue
+        raise RuntimeError(
+            f"YouTube upload was truncated on every one of {MAX_ATTEMPTS} attempts "
+            f"(recovered video stuck with no duration). Check the source file and network."
+        )
+
+    url = f"https://www.youtube.com/shorts/{video_id}"
+    print(f"[YouTube] Upload complete and verified: {url}")
+
+    if playlist_id:
+        _yt_add_to_playlist(youtube, playlist_id, video_id)
 
     return {
         "platform":    "youtube",
