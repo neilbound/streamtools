@@ -444,8 +444,11 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
 - [ ] **Daemon supervision** — Task Scheduler works but is fragile (was found *Disabled*, causing a
       silent multi-day posting gap). Consider a `--loop` mode + NSSM service, or at least a health
       alert. Requires the desktop to stay on + logged in (task is `Interactive` logon).
-- [ ] **Archive posted videos to Google Drive** — move successfully-posted clips off local disk to
-      Drive for cold storage once confirmed posted + reconciled (design in progress).
+- [x] ~~**Archive posted videos to Google Drive**~~ — built (`pipeline/archive.py` +
+      `archive_posted_episodes` MCP tool). Per-episode sweep: once every queued clip of an episode
+      is YouTube-confirmed, its deliverables (clips/segments/episode) are copied to the archive root,
+      size-verified, then deleted locally (intermediates stay). Point `STREAMTOOLS_ARCHIVE_ROOT` at a
+      Google Drive for Desktop synced folder. *Pending: operator to install Drive for Desktop.*
 - [ ] **Transcript editor** — fix transcription errors before export
 - [ ] **Thumbnail generator** — still frame + text overlay for YouTube
 - [ ] **Chyron UI controls** — font size and position currently hardcoded in `export.py`

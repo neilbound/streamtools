@@ -861,6 +861,55 @@ def reconcile_uploads(channel: str = "ilb") -> str:
 
 
 @mcp.tool()
+def archive_posted_episodes(dry_run: bool = True, archive_root: str = "") -> str:
+    """
+    Move fully-posted episodes' deliverables to cold storage (e.g. a Google Drive for
+    Desktop synced folder), freeing local disk.
+
+    An episode is archived only once EVERY one of its queued clips has a confirmed YouTube
+    upload. Only deliverables move (clips/, segments/, episode/ — MP4s, SRTs, descriptions);
+    large regenerable intermediates (stitched.mp4, *.wav, transcripts) stay local. Files are
+    copied, size-verified at the destination, then the local originals are deleted
+    (move-once-verified — a failed copy never deletes originals). An ARCHIVED.json marker
+    makes it idempotent.
+
+    Args:
+        dry_run:      If True (default), report what WOULD be archived without moving anything.
+                      Run with dry_run=False to actually move.
+        archive_root: Destination folder. Empty → the STREAMTOOLS_ARCHIVE_ROOT env var (point
+                      it at your Drive for Desktop synced folder).
+
+    Returns:
+        Per-episode report of what was (or would be) archived.
+    """
+    from pipeline.archive import (
+        archive_ready_episodes, resolve_archive_root, find_archivable_episodes,
+    )
+    root = resolve_archive_root(archive_root)
+    if not root:
+        return ("No archive root configured. Install Google Drive for Desktop, then set "
+                "STREAMTOOLS_ARCHIVE_ROOT to the synced folder path (or pass archive_root).")
+    ready = find_archivable_episodes()
+    if not ready:
+        return ("No episodes ready to archive. An episode qualifies once every one of its "
+                "queued clips has a confirmed YouTube upload.")
+    try:
+        reports = archive_ready_episodes(archive_root=archive_root, dry_run=dry_run)
+    except Exception as exc:
+        return f"Archive failed: {type(exc).__name__}: {exc}"
+
+    verb = "DRY RUN — would archive" if dry_run else "Archived"
+    lines = [f"{verb} {len(reports)} episode(s) to {root}:", ""]
+    for r in reports:
+        lines.append(f"  {r['episode']}: {r['files']} files, {r['bytes'] / 1e6:.0f} MB")
+        if not dry_run:
+            lines.append(f"      copied {r['copied']}, removed-local {r['deleted']}")
+    if dry_run:
+        lines.append("\nRe-run with dry_run=False to perform the move.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def confirm_tiktok_posted(post_id: str) -> str:
     """
     Record that a TikTok inbox upload has been manually posted in the app.

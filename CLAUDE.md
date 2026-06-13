@@ -180,6 +180,21 @@ every 15 min) handle uploads. Hard-won rules — violate these and posts silentl
   (failed/partial entries, queue warnings, unposted TikTok drafts). After tapping Post on a
   TikTok inbox upload, run `confirm_tiktok_posted(post_id)` to clear the draft reminder.
 
+## Archiving posted videos
+
+`pipeline/archive.py` + the `archive_posted_episodes` MCP tool move finished episodes
+to cold storage (a Google Drive for Desktop synced folder) to free local disk.
+
+- **Trigger:** per-episode sweep — an episode is archivable once *every* queued clip
+  for it has a confirmed YouTube upload (`results.youtube.status == "ok"`).
+- **Scope:** deliverables only (`clips/`, `segments/`, `episode/`). Regenerable
+  intermediates (`stitched.mp4`, `vertical_stitched.mp4`, `*.wav`, transcripts) stay local.
+- **Safety:** move-once-verified — copy → verify size at destination → delete local
+  originals only after *all* files verify. `ARCHIVED.json` marker makes it idempotent.
+- **Config:** set `STREAMTOOLS_ARCHIVE_ROOT` to the Drive-synced folder. Always
+  `dry_run=True` first. Note: with Drive for Desktop, "verified at destination" confirms
+  the file reached the synced folder; Drive uploads to the cloud asynchronously after.
+
 ## Git
 
 - `master` is the stable base; feature work goes on named branches
