@@ -434,14 +434,18 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
 
 - [x] ~~**MCP server**~~ — built (`mcp_server.py`): full pipeline + publishing exposed as MCP tools
 - [x] ~~**Batch upload / scheduling**~~ — built (publish queue + daemon)
-- [ ] **TikTok credentials for `ilb`** — create dev app; wire `tiktok_privacy_level` into per-channel
-      config (`SELF_ONLY` while unaudited, `PUBLIC_TO_EVERYONE` after audit). Optionally add the
-      inbox/draft upload flow (finish-in-app) as an alternative to direct-post-then-flip.
+- [x] ~~**TikTok for `ilb`**~~ — inbox/draft mode working (`upload_tiktok(post_mode="inbox")`, default);
+      operator taps Post in the mobile app. Direct public auto-post deferred (needs audit + domain verify).
+- [x] ~~**Upload self-healing**~~ — YouTube Shorts + episode uploads recover from timeout-after-success
+      (id recovered via uploads playlist) and truncation (`classify_youtube_health` → delete+retry);
+      playlist add retries transient errors.
+- [x] ~~**Schedule-stuck / drift verification**~~ — `reconcile_youtube()` + `reconcile_uploads` MCP tool
+      audit ok'd entries against the channel; daemon runs it once/24h (`_maybe_reconcile`).
 - [ ] **Daemon supervision** — Task Scheduler works but is fragile (was found *Disabled*, causing a
       silent multi-day posting gap). Consider a `--loop` mode + NSSM service, or at least a health
       alert. Requires the desktop to stay on + logged in (task is `Interactive` logon).
-- [ ] **Schedule-stuck verification** — read back YouTube video status after upload to confirm the
-      intended public/scheduled state actually took (needs the broader `youtube` read scope).
+- [ ] **Archive posted videos to Google Drive** — move successfully-posted clips off local disk to
+      Drive for cold storage once confirmed posted + reconciled (design in progress).
 - [ ] **Transcript editor** — fix transcription errors before export
 - [ ] **Thumbnail generator** — still frame + text overlay for YouTube
 - [ ] **Chyron UI controls** — font size and position currently hardcoded in `export.py`

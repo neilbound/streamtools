@@ -27,11 +27,17 @@ from pipeline.publish_queue import (
     get_due,
     get_retryable,
     is_fatal_error,
+    list_all,
     mark_complete,
     mark_failed,
     schedule_retry,
 )
-from pipeline.publish import upload_youtube, upload_tiktok, upload_instagram
+from pipeline.publish import (
+    reconcile_youtube,
+    upload_youtube,
+    upload_tiktok,
+    upload_instagram,
+)
 from pipeline.validate import quick_probe_check
 
 
@@ -149,6 +155,45 @@ def main():
         run_lock.release()
 
 
+_RECONCILE_MARKER = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "output", ".last_reconcile"
+)
+_RECONCILE_INTERVAL = 86400  # once per 24h
+
+
+def _maybe_reconcile():
+    """Once per 24h, audit ok'd YouTube uploads against the actual channel and log any
+    drift (videos deleted/rejected/truncated after the fact). Cheap no-op between runs."""
+    import time
+    try:
+        last = float(open(_RECONCILE_MARKER).read().strip())
+    except Exception:
+        last = 0.0
+    if time.time() - last < _RECONCILE_INTERVAL:
+        return
+    channels = {
+        e.get("channel", "neilbound") for e in list_all()
+        if e.get("results", {}).get("youtube", {}).get("status") == "ok"
+    }
+    for ch in sorted(channels):
+        try:
+            problems = reconcile_youtube(ch)
+            if problems:
+                log.warning("Reconciliation [%s]: %d discrepancy(ies):", ch, len(problems))
+                for p in problems:
+                    log.warning("  [%s] %s  %s", p["issue"], p["video_id"], p["title"])
+            else:
+                log.info("Reconciliation [%s]: all uploads healthy.", ch)
+        except Exception as exc:
+            log.warning("Reconciliation [%s] skipped: %s", ch, exc)
+    try:
+        os.makedirs(os.path.dirname(_RECONCILE_MARKER), exist_ok=True)
+        with open(_RECONCILE_MARKER, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+
 def _run():
     now = datetime.now(tz=timezone.utc)
     log.info("Starting at %s", now.isoformat())
@@ -161,6 +206,9 @@ def _run():
             "setup_credentials.py --platform <platform> for each platform."
         )
         return
+
+    # Daily audit of already-posted uploads (runs even on idle ticks; gated to 24h).
+    _maybe_reconcile()
 
     # Freshly-due (pending) posts + failed/partial posts eligible for auto-retry.
     # The two lists are disjoint by status, so concatenation needs no dedupe.
