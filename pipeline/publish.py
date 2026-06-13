@@ -166,6 +166,71 @@ def _yt_add_to_playlist(youtube, playlist_id: str, video_id: str, retries: int =
     return False
 
 
+def _youtube_service(channel: str):
+    """Build an authenticated YouTube API client for a channel (raises if creds missing)."""
+    client_id     = _cred(channel, "YOUTUBE_CLIENT_ID")
+    client_secret = _cred(channel, "YOUTUBE_CLIENT_SECRET")
+    refresh_token = _cred(channel, "YOUTUBE_REFRESH_TOKEN")
+    if not (client_id and client_secret and refresh_token):
+        raise EnvironmentError(
+            f"YouTube credentials incomplete for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
+        )
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    creds = Credentials(token=None, refresh_token=refresh_token,
+                        client_id=client_id, client_secret=client_secret,
+                        token_uri="https://oauth2.googleapis.com/token")
+    creds.refresh(Request())
+    return build("youtube", "v3", credentials=creds)
+
+
+def reconcile_youtube(channel: str = "ilb") -> list[dict]:
+    """
+    Audit every queue entry whose YouTube upload was marked 'ok' against the actual
+    channel state, catching anything that slipped through after the fact:
+      - "missing":   the video was deleted/rejected (no longer on the channel)
+      - "truncated": stuck with no duration (P0D) and processing failed/terminated
+    Videos still processing normally (no duration yet) are NOT flagged.
+
+    Returns a list of {post_id, video_id, title, issue}. Empty = all healthy.
+    """
+    from pipeline.publish_queue import list_all
+    entries = [
+        e for e in list_all()
+        if (e.get("results", {}).get("youtube", {}).get("status") == "ok"
+            and e["results"]["youtube"].get("video_id"))
+    ]
+    if not entries:
+        return []
+    yt = _youtube_service(channel)
+    health: dict[str, str] = {}
+    ids = [e["results"]["youtube"]["video_id"] for e in entries]
+    for i in range(0, len(ids), 50):   # videos.list accepts up to 50 ids/call
+        batch = ids[i:i + 50]
+        r = yt.videos().list(
+            part="status,contentDetails,processingDetails", id=",".join(batch)
+        ).execute()
+        found = {}
+        for it in r.get("items", []):
+            found[it["id"]] = classify_youtube_health(it)
+        for vid in batch:
+            health[vid] = found.get(vid, "missing")
+    problems = []
+    for e in entries:
+        vid = e["results"]["youtube"]["video_id"]
+        h = health.get(vid, "missing")
+        if h in ("missing", "truncated"):
+            problems.append({
+                "post_id": e["post_id"],
+                "video_id": vid,
+                "title": e.get("title", "")[:50],
+                "issue": h,
+            })
+    return problems
+
+
 # ── YouTube Shorts ─────────────────────────────────────────────────────────────
 
 def upload_youtube(
@@ -482,30 +547,57 @@ def upload_youtube_episode(
         },
     }
 
-    media = MediaFileUpload(
-        video_path,
-        mimetype="video/mp4",
-        resumable=True,
-        chunksize=1024 * 1024 * 5,
-    )
+    # ── Resilient upload (same self-healing as Shorts; episodes are large and
+    # more timeout-prone). Clean uploads are trusted; a video recovered after an
+    # interrupted upload is health-checked and deleted+retried if truncated. ────
+    MAX_ATTEMPTS = 3
+    video_id = None
+    last_exc = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        clean = False
+        try:
+            media = MediaFileUpload(video_path, mimetype="video/mp4",
+                                    resumable=True, chunksize=1024 * 1024 * 5)
+            print(f"[YouTube Episode] Uploading (attempt {attempt}/{MAX_ATTEMPTS}): {video_path}")
+            request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
+            response = None
+            while response is None:
+                status_obj, response = request.next_chunk()
+                if status_obj:
+                    print(f"[YouTube Episode] Upload progress: {int(status_obj.progress() * 100)}%")
+            video_id = response["id"]
+            clean = True
+            print(f"[YouTube Episode] Upload complete: {video_id}")
+        except Exception as exc:
+            last_exc = exc
+            print(f"[YouTube Episode] Upload errored on attempt {attempt}: {exc}")
+            print("[YouTube Episode] Checking whether the video landed anyway...")
+            video_id = _yt_find_recent_by_title(youtube, title)
+            if video_id:
+                print(f"[YouTube Episode] Recovered uploaded video despite error: {video_id}")
 
-    print(f"[YouTube Episode] Uploading: {video_path}")
-    request = youtube.videos().insert(
-        part="snippet,status",
-        body=body,
-        media_body=media,
-    )
+        if not video_id:
+            if attempt < MAX_ATTEMPTS:
+                continue
+            raise RuntimeError(
+                f"YouTube episode upload failed after {MAX_ATTEMPTS} attempts. Last error: {last_exc}"
+            )
+        if clean:
+            break
+        health = _yt_wait_health(youtube, video_id, polls=6, gap=20.0)
+        if health == "ok":
+            break
+        print(f"[YouTube Episode] Recovered video {video_id} truncated — deleting and retrying")
+        _yt_delete(youtube, video_id)
+        video_id = None
+        if attempt < MAX_ATTEMPTS:
+            continue
+        raise RuntimeError(
+            f"YouTube episode upload was truncated on every one of {MAX_ATTEMPTS} attempts."
+        )
 
-    response = None
-    while response is None:
-        status_obj, response = request.next_chunk()
-        if status_obj:
-            pct = int(status_obj.progress() * 100)
-            print(f"[YouTube Episode] Upload progress: {pct}%")
-
-    video_id = response["id"]
     url = f"https://www.youtube.com/watch?v={video_id}"
-    print(f"[YouTube Episode] Upload complete: {url}")
+    print(f"[YouTube Episode] Upload complete and verified: {url}")
 
     # Optional: set thumbnail (non-fatal)
     if thumbnail_path and os.path.exists(thumbnail_path):
@@ -542,21 +634,9 @@ def upload_youtube_episode(
         except Exception as e:
             print(f"[YouTube Episode] Caption upload failed (non-fatal): {e}")
 
-    # Add to playlist if one is configured (non-fatal)
+    # Add to playlist if one is configured (non-fatal, retries transient errors)
     if playlist_id:
-        try:
-            youtube.playlistItems().insert(
-                part="snippet",
-                body={
-                    "snippet": {
-                        "playlistId": playlist_id,
-                        "resourceId": {"kind": "youtube#video", "videoId": video_id},
-                    }
-                },
-            ).execute()
-            print(f"[YouTube Episode] Added to playlist: {playlist_id}")
-        except Exception as exc:
-            print(f"[YouTube Episode] Warning: could not add to playlist ({exc})")
+        _yt_add_to_playlist(youtube, playlist_id, video_id)
 
     return {
         "platform":          "youtube",

@@ -148,6 +148,13 @@ every 15 min) handle uploads. Hard-won rules — violate these and posts silentl
   only failed platforms). To force a re-upload of an already-`ok` platform (e.g. wrong channel), clear
   that platform's result and set status `pending` — never blanket-reset `results={}` (re-posts the
   successful platforms too).
+- **YouTube uploads self-heal.** `upload_youtube`/`upload_youtube_episode` (3 attempts): a clean upload
+  is trusted; on an upload exception the id is recovered from the channel's uploads playlist (the bytes
+  may have landed — avoids a duplicate re-upload); a *recovered* video is health-checked
+  (`classify_youtube_health`: real duration = ok, `P0D`+failed = truncated) and deleted+retried if
+  truncated. Do NOT health-check clean uploads — a healthy fresh upload reads `P0D` for ~a minute.
+  Playlist add retries transient `429`/`409`. `reconcile_youtube()` / the `reconcile_uploads` MCP tool
+  audits ok'd entries against the channel after the fact (flags `missing`/`truncated`).
 - **TikTok (`ilb`) needs its own account auth.** The Is Love Blind? TikTok is a **separate account**
   from `neilbound` — same wrong-account trap as YouTube. Log the browser into the *Is Love Blind?*
   TikTok ONLY, then run `setup_credentials.py --platform tiktok --channel ilb` (writes `ILB_TIKTOK_*`).

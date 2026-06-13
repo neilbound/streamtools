@@ -824,6 +824,43 @@ def retry_failed_clip(post_id: str) -> str:
 
 
 @mcp.tool()
+def reconcile_uploads(channel: str = "ilb") -> str:
+    """
+    Audit every queue entry marked as a successful YouTube upload against the actual
+    channel, catching problems that slipped through after the fact:
+      - "missing":   the video was deleted or rejected (no longer on the channel)
+      - "truncated": stuck with no duration (interrupted/corrupt upload)
+
+    Videos still processing normally are not flagged. Run this periodically (or after
+    an incident) to confirm what the queue thinks posted actually did, intact.
+
+    Args:
+        channel: Publishing channel to audit. Default "ilb".
+
+    Returns:
+        A report of any discrepancies, or confirmation that all are healthy.
+    """
+    from pipeline.publish import reconcile_youtube
+    try:
+        problems = reconcile_youtube(channel)
+    except Exception as exc:
+        return f"Reconciliation failed: {type(exc).__name__}: {exc}"
+
+    if not problems:
+        return f"All YouTube uploads for channel '{channel}' verified healthy on the channel."
+
+    lines = [f"{len(problems)} discrepancy(ies) on channel '{channel}':", ""]
+    for p in problems:
+        lines.append(f"  [{p['issue'].upper()}] {p['video_id']}  (post {p['post_id']})")
+        lines.append(f"      {p['title']}")
+    lines.append("")
+    lines.append("'missing' = deleted/rejected (a good copy may exist under a different ID); "
+                 "'truncated' = corrupt upload. Use retry_failed_clip after clearing the bad "
+                 "result, or re-arm the entry, to re-post.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def confirm_tiktok_posted(post_id: str) -> str:
     """
     Record that a TikTok inbox upload has been manually posted in the app.
