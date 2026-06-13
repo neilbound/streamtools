@@ -154,7 +154,8 @@ every 15 min) handle uploads. Hard-won rules — violate these and posts silentl
   (`classify_youtube_health`: real duration = ok, `P0D`+failed = truncated) and deleted+retried if
   truncated. Do NOT health-check clean uploads — a healthy fresh upload reads `P0D` for ~a minute.
   Playlist add retries transient `429`/`409`. `reconcile_youtube()` / the `reconcile_uploads` MCP tool
-  audits ok'd entries against the channel after the fact (flags `missing`/`truncated`).
+  audits ok'd entries against the channel after the fact (flags `missing`/`truncated`); the daemon
+  also runs this automatically once per 24h (`_maybe_reconcile`) and logs any drift.
 - **TikTok (`ilb`) needs its own account auth.** The Is Love Blind? TikTok is a **separate account**
   from `neilbound` — same wrong-account trap as YouTube. Log the browser into the *Is Love Blind?*
   TikTok ONLY, then run `setup_credentials.py --platform tiktok --channel ilb` (writes `ILB_TIKTOK_*`).
