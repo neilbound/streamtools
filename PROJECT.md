@@ -172,9 +172,12 @@ Credentials are per-channel env vars (`{CHANNEL}_YOUTUBE_*`, etc.) resolved by `
   rejected). Workflow without the audit/demo-video: post `SELF_ONLY`, then flip to public in-app.
 
 ### Scheduling convention
+- **Primary cadence: 1 short/day at 6pm EDT (22:00 UTC).** 2/day oversaturated and split
+  the algorithm's attention while the audience is small — revisit 2/day once followers grow.
+  The active profile's `posting_slots_utc` is `[22]` (single 6pm slot ⇒ 1/day at 6pm).
+- **Segment videos (both orientations)** → same day/time as the *first short of that segment*
+  (the cluster). Those are the only days carrying more than one upload.
 - **Full episode** → same time as the intro short.
-- **Segment videos (both orientations)** → same time as the first short from that segment.
-- **Shorts** → spread across `posting_slots_utc` (default 16/22/13 UTC = noon/6pm/9am EST).
 
 ---
 
