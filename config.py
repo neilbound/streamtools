@@ -77,7 +77,7 @@ def _ensure_profile_style(profile) -> dict:
 
 def load() -> dict:
     if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             saved = json.load(f)
 
         # Migrate legacy top-level producer_context
@@ -107,8 +107,10 @@ def load() -> dict:
 
 
 def save(cfg: dict) -> None:
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f, indent=2)
+    # ensure_ascii=False keeps non-ASCII (curly quotes, etc.) readable; utf-8 so it
+    # round-trips on Windows (default cp1252 can't decode them on the next load()).
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
 def active_profile(cfg: dict) -> dict:
