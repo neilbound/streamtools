@@ -189,11 +189,13 @@ def _load_snapshots() -> list[dict]:
     return rows
 
 
-def snapshot(channel: str = "ilb") -> dict:
+def snapshot(channel: str = "ilb", force: bool = False) -> dict:
     """
     Record today's stats for every posted video, one row per video per day, appended to
     output/analytics/snapshots.jsonl. Tier-1 stats always; Tier-2 analytics when the scope
-    is granted. Skips videos already snapshotted today. Returns a small summary.
+    is granted. Skips videos already snapshotted today unless force=True (manual refreshes
+    force, so a re-pull after enabling Tier 2 captures it the same day; the newest row per
+    video wins in latest_per_video). Returns a small summary.
     """
     meta = video_metadata()
     video_ids = list(meta.keys())
@@ -221,7 +223,7 @@ def snapshot(channel: str = "ilb") -> dict:
     written = 0
     with open(_SNAPSHOTS, "a", encoding="utf-8") as f:
         for vid in video_ids:
-            if vid in already or vid not in stats:
+            if (vid in already and not force) or vid not in stats:
                 continue
             s = stats[vid]
             a = analytics.get(vid, {})
@@ -322,15 +324,19 @@ def report(shorts_only: bool = True) -> dict:
         r["duration_bucket"] = _duration_bucket(r.get("duration_sec") or 0)
 
     by_views = sorted(rows, key=lambda r: r["views"], reverse=True)
+    # Videos too new for the Analytics API to have processed return no retention —
+    # exclude them from retention rankings/averages rather than treating as 0.
     by_retention = sorted([r for r in rows if r.get("avg_view_pct") is not None],
                           key=lambda r: r["avg_view_pct"], reverse=True)
     by_engagement = sorted(rows, key=lambda r: r["engagement_pct"], reverse=True)
+    rets = [r["avg_view_pct"] for r in by_retention]
 
     def slim(r):
         return {
             "video_id": r["video_id"], "title": r.get("title", "")[:50],
             "segment": r.get("segment"), "age_days": r.get("age_days"),
-            "views": r["views"], "retention_pct": r.get("avg_view_pct"),
+            "views": r["views"],
+            "retention_pct": round(r["avg_view_pct"], 1) if r.get("avg_view_pct") is not None else None,
             "engagement_pct": r["engagement_pct"], "duration_sec": r.get("duration_sec"),
         }
 
@@ -341,10 +347,13 @@ def report(shorts_only: bool = True) -> dict:
             "views": sum(r["views"] for r in rows),
             "avg_views": round(sum(r["views"] for r in rows) / len(rows), 1),
             "avg_engagement_pct": round(sum(r["engagement_pct"] for r in rows) / len(rows), 2),
+            "avg_retention_pct": round(sum(rets) / len(rets), 1) if rets else None,
+            "retention_coverage": f"{len(rets)}/{len(rows)} videos have analytics data",
         },
         "top_by_views": [slim(r) for r in by_views[:5]],
         "bottom_by_views": [slim(r) for r in by_views[-5:]],
         "top_by_retention": [slim(r) for r in by_retention[:5]],
+        "bottom_by_retention": [slim(r) for r in by_retention[-5:]],
         "top_by_engagement": [slim(r) for r in by_engagement[:5]],
         "by_segment": _group_means(rows, "segment"),
         "by_weekday": _group_means(rows, "weekday"),
