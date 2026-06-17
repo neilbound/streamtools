@@ -1858,11 +1858,11 @@ def refresh_analytics(channel: str = "ilb") -> str:
     """
     from pipeline.analytics import snapshot
     try:
-        r = snapshot(channel=channel)
+        r = snapshot(channel=channel, force=True)   # manual refresh always pulls fresh
     except Exception as exc:
         return f"Snapshot failed: {type(exc).__name__}: {exc}"
-    tier = "full (retention included)" if r.get("tier2") else ("Tier 1 only — re-auth with "
-            "yt-analytics.readonly for retention/subscribers")
+    tier = "full (retention included)" if r.get("tier2") else ("Tier 1 only — enable the "
+            "YouTube Analytics API in the GCP project for retention/subscribers")
     return (f"Recorded {r.get('snapshotted', 0)} video snapshot(s) for {r.get('date','today')}.\n"
             f"Metrics: {tier}.")
 
