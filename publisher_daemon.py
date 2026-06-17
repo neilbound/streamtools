@@ -38,6 +38,7 @@ from pipeline.publish import (
     upload_tiktok,
     upload_instagram,
 )
+from pipeline.analytics import snapshot as _analytics_snapshot
 from pipeline.validate import quick_probe_check
 
 
@@ -194,6 +195,36 @@ def _maybe_reconcile():
         pass
 
 
+_SNAPSHOT_MARKER = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "output", ".last_snapshot"
+)
+_SNAPSHOT_INTERVAL = 86400  # once per 24h
+
+
+def _maybe_snapshot():
+    """Once per 24h, record a performance snapshot of every posted video so we build a
+    growth time series for content optimization. Cheap no-op between runs."""
+    import time
+    try:
+        last = float(open(_SNAPSHOT_MARKER).read().strip())
+    except Exception:
+        last = 0.0
+    if time.time() - last < _SNAPSHOT_INTERVAL:
+        return
+    try:
+        result = _analytics_snapshot(channel="ilb")
+        log.info("Analytics snapshot: %s row(s) recorded (tier2=%s)",
+                 result.get("snapshotted"), result.get("tier2"))
+    except Exception as exc:
+        log.warning("Analytics snapshot skipped: %s", exc)
+    try:
+        os.makedirs(os.path.dirname(_SNAPSHOT_MARKER), exist_ok=True)
+        with open(_SNAPSHOT_MARKER, "w") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+
 def _run():
     now = datetime.now(tz=timezone.utc)
     log.info("Starting at %s", now.isoformat())
@@ -207,8 +238,9 @@ def _run():
         )
         return
 
-    # Daily audit of already-posted uploads (runs even on idle ticks; gated to 24h).
+    # Daily audit of already-posted uploads + performance snapshot (gated to 24h each).
     _maybe_reconcile()
+    _maybe_snapshot()
 
     # Freshly-due (pending) posts + failed/partial posts eligible for auto-retry.
     # The two lists are disjoint by status, so concatenation needs no dedupe.

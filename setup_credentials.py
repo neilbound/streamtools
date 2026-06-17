@@ -123,8 +123,9 @@ def setup_youtube(channel: str = "NEILBOUND"):
         sys.exit(1)
 
     scopes = [
-        "https://www.googleapis.com/auth/youtube.upload",  # upload videos
-        "https://www.googleapis.com/auth/youtube",         # manage playlists (add Shorts to playlist)
+        "https://www.googleapis.com/auth/youtube.upload",        # upload videos
+        "https://www.googleapis.com/auth/youtube",               # manage playlists (add Shorts to playlist)
+        "https://www.googleapis.com/auth/yt-analytics.readonly",  # read performance metrics (retention, etc.)
     ]
 
     print()

@@ -186,6 +186,27 @@ def _youtube_service(channel: str):
     return build("youtube", "v3", credentials=creds)
 
 
+def _youtube_analytics_service(channel: str):
+    """Build a YouTube Analytics API (v2) client — needs the yt-analytics.readonly scope.
+    Raises if creds are missing; the caller handles a 403 (scope not yet granted)."""
+    client_id     = _cred(channel, "YOUTUBE_CLIENT_ID")
+    client_secret = _cred(channel, "YOUTUBE_CLIENT_SECRET")
+    refresh_token = _cred(channel, "YOUTUBE_REFRESH_TOKEN")
+    if not (client_id and client_secret and refresh_token):
+        raise EnvironmentError(
+            f"YouTube credentials incomplete for channel '{channel}'. "
+            f"Run: python setup_credentials.py --platform youtube --channel {channel}"
+        )
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    creds = Credentials(token=None, refresh_token=refresh_token,
+                        client_id=client_id, client_secret=client_secret,
+                        token_uri="https://oauth2.googleapis.com/token")
+    creds.refresh(Request())
+    return build("youtubeAnalytics", "v2", credentials=creds)
+
+
 def reconcile_youtube(channel: str = "ilb") -> list[dict]:
     """
     Audit every queue entry whose YouTube upload was marked 'ok' against the actual

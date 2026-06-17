@@ -444,6 +444,13 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
       playlist add retries transient errors.
 - [x] ~~**Schedule-stuck / drift verification**~~ — `reconcile_youtube()` + `reconcile_uploads` MCP tool
       audit ok'd entries against the channel; daemon runs it once/24h (`_maybe_reconcile`).
+- [x] ~~**Channel performance analytics**~~ — built (`pipeline/analytics.py` + `refresh_analytics`,
+      `performance_report`, `video_performance` MCP tools). Daily snapshot time series
+      (`output/analytics/snapshots.jsonl`); leaderboards + group-bys (couple, weekday, hour, length).
+      Tier 1 (views/likes/comments) live; Tier 2 (retention/subscribers) needs the one-time
+      `yt-analytics.readonly` re-auth. *Pending: operator re-auth for Tier 2.*
+- [ ] **Instagram analytics** — Reel insights (reach, plays, saves, shares) via the Graph API for
+      cross-platform comparison (deferred; YouTube-only for now).
 - [ ] **Daemon supervision** — Task Scheduler works but is fragile (was found *Disabled*, causing a
       silent multi-day posting gap). Consider a `--loop` mode + NSSM service, or at least a health
       alert. Requires the desktop to stay on + logged in (task is `Interactive` logon).

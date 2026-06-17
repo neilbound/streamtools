@@ -1844,5 +1844,111 @@ def _write_upload_checklist(path: str, scheduled_clips: list[dict], platforms: l
         f.write("\n".join(lines) + "\n")
 
 
+# ── Analytics / content optimization tools ───────────────────────────────────
+
+@mcp.tool()
+def refresh_analytics(channel: str = "ilb") -> str:
+    """
+    Pull a fresh performance snapshot now (views/likes/comments, plus retention & subscribers
+    if the yt-analytics.readonly scope is granted) and append it to the snapshot time series.
+    The daemon also does this daily; use this to update on demand before a report.
+
+    Args:
+        channel: Channel to snapshot. Default "ilb".
+    """
+    from pipeline.analytics import snapshot
+    try:
+        r = snapshot(channel=channel)
+    except Exception as exc:
+        return f"Snapshot failed: {type(exc).__name__}: {exc}"
+    tier = "full (retention included)" if r.get("tier2") else ("Tier 1 only — re-auth with "
+            "yt-analytics.readonly for retention/subscribers")
+    return (f"Recorded {r.get('snapshotted', 0)} video snapshot(s) for {r.get('date','today')}.\n"
+            f"Metrics: {tier}.")
+
+
+@mcp.tool()
+def performance_report() -> str:
+    """
+    Content-optimization report from the latest performance snapshot: leaderboards (views,
+    retention, engagement) and group-by breakdowns (couple/segment, posting weekday, posting
+    hour, clip-length bucket). Shorts only. Run refresh_analytics first for current numbers.
+
+    Retention (avg % viewed) is the strongest Shorts signal and appears once the
+    yt-analytics.readonly scope is granted; otherwise the report is views + engagement only.
+    """
+    from pipeline.analytics import report
+    rep = report(shorts_only=True)
+    if not rep.get("videos"):
+        return rep.get("note", "No data yet — run refresh_analytics first.")
+
+    L = []
+    t = rep["totals"]
+    L.append(f"PERFORMANCE REPORT — {rep['videos']} shorts"
+             + ("" if rep["tier2"] else "  (Tier 1: no retention yet — re-auth for it)"))
+    L.append(f"Totals: {t['views']:,} views | avg {t['avg_views']:,}/video | "
+             f"avg engagement {t['avg_engagement_pct']}%")
+
+    def rows(items, metric, label, unit=""):
+        out = [f"\n{label}:"]
+        for r in items:
+            mv = r.get(metric)
+            mv = f"{mv}{unit}" if mv is not None else "—"
+            out.append(f"  {mv:>8}  {r['views']:>6,}v {r.get('age_days','?')}d  "
+                       f"[{r.get('segment','?')}] {r['title']}")
+        return out
+
+    L += rows(rep["top_by_views"], "views", "Top by views")
+    if rep["tier2"] and rep["top_by_retention"]:
+        L += rows(rep["top_by_retention"], "retention_pct", "Top by retention", "%")
+    L += rows(rep["top_by_engagement"], "engagement_pct", "Top by engagement", "%")
+
+    def grp(items, label):
+        out = [f"\n{label} (avg retention / avg views / n):"]
+        for g in items:
+            ret = f"{g['avg_retention_pct']}%" if g["avg_retention_pct"] is not None else "—"
+            out.append(f"  {str(g['group']):>10}: {ret:>6} / {g['avg_views']:>7,} / n={g['n']}")
+        return out
+
+    L += grp(rep["by_segment"], "By couple/segment")
+    L += grp(rep["by_weekday"], "By weekday")
+    L += grp(rep["by_hour"], "By posting hour (UTC)")
+    L += grp(rep["by_duration_bucket"], "By clip length")
+
+    L.append("\nNOTE: small sample — directional, not statistical. Views accrue over days, so "
+             "compare similar ages. Couple and posting-time effects overlap (not causation).")
+    return "\n".join(L)
+
+
+@mcp.tool()
+def video_performance(video_id: str) -> str:
+    """
+    Performance detail and growth curve for a single video, from the snapshot history.
+
+    Args:
+        video_id: YouTube video id (e.g. from list_scheduled_clips results).
+    """
+    from pipeline.analytics import _load_snapshots, video_metadata
+    snaps = sorted([r for r in _load_snapshots() if r.get("video_id") == video_id],
+                   key=lambda r: r.get("ts", ""))
+    if not snaps:
+        return (f"No snapshots for {video_id}. Run refresh_analytics, or check the id "
+                "(it must be a posted video).")
+    meta = video_metadata().get(video_id, {})
+    latest = snaps[-1]
+    L = [f"VIDEO {video_id} — {latest.get('title','')[:60]}",
+         f"  segment={latest.get('segment')}  kind={latest.get('kind')}  "
+         f"posted {meta.get('weekday','?')} {meta.get('hour','?')}:00 UTC  "
+         f"dur={latest.get('duration_sec')}s",
+         f"  latest: {latest['views']:,} views, {latest['likes']} likes, "
+         f"{latest['comments']} comments"
+         + (f", retention {latest['avg_view_pct']}%" if latest.get('avg_view_pct') is not None else ""),
+         "  growth (date: views):"]
+    for r in snaps:
+        ret = f" ret {r['avg_view_pct']}%" if r.get("avg_view_pct") is not None else ""
+        L.append(f"    {r.get('date')}  age {r.get('age_days','?')}d  {r['views']:,} views{ret}")
+    return "\n".join(L)
+
+
 if __name__ == "__main__":
     mcp.run()
