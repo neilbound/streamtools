@@ -44,6 +44,10 @@ DEFAULT_PIPELINE = {
     # segment labels, e.g. "Age Of Attraction - Season 1 - ". Longest match wins.
     # Per-show — leave empty to use the raw filename (minus extension) as the label.
     "segment_label_prefixes": [],
+    # Burn a bold "hook" card over the first few seconds of each social short.
+    # Conversational source rarely opens on a punchy line, so the hook lives on
+    # screen. Uses the clip-finder's per-clip "hook" field.
+    "hook_overlay": True,
 }
 
 _PIPELINE_KEYS = set(DEFAULT_PIPELINE.keys())
