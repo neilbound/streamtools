@@ -195,6 +195,24 @@ to cold storage (a Google Drive for Desktop synced folder) to free local disk.
   `dry_run=True` first. Note: with Drive for Desktop, "verified at destination" confirms
   the file reached the synced folder; Drive uploads to the cloud asynchronously after.
 
+## Performance analytics
+
+`pipeline/analytics.py` + MCP tools (`refresh_analytics`, `performance_report`,
+`video_performance`) measure YouTube performance to optimize content.
+
+- **Two tiers:** Tier 1 (views/likes/comments) works with the `youtube` scope. Tier 2
+  (retention `averageViewPercentage`, avg view duration, subscribers, shares) needs the
+  **`yt-analytics.readonly`** scope — one re-auth via `setup_credentials.py`. `fetch_video_analytics`
+  degrades gracefully (returns `{}`) until the scope is granted, so Tier 1 always works.
+- **Daily snapshots:** the daemon's `_maybe_snapshot()` (once/24h, mirrors `_maybe_reconcile`)
+  appends one row/video/day to `output/analytics/snapshots.jsonl` — a growth time series so
+  videos can be compared at the **same age** (Shorts accrue views over days; never rank raw
+  lifetime views across different ages).
+- **Metadata join:** video_id → couple/segment (clip_path `__` split), posting weekday/hour,
+  clip length, from `publish_queue.list_all()`. Group-by breakdowns drive content decisions.
+- Retention is the strongest Shorts signal; engagement and timing are secondary. Treat the
+  small sample as directional, not statistical.
+
 ## Git
 
 - `master` is the stable base; feature work goes on named branches
