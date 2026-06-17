@@ -23,8 +23,19 @@
 
 - `transcribe()` must always return `{"text": str, "words": [{"word", "start", "end"}]}`
   — captions, clip finder, and export all depend on this shape
-- `find_clips()` is optional and requires `ANTHROPIC_API_KEY` in `.env`
+- `find_clips()` is optional and requires `ANTHROPIC_API_KEY` in `.env`; each clip also
+  carries a short `hook` (≤5 words) used for the opening hook overlay
 - `clean_audio()` outputs a 48kHz WAV — DeepFilterNet3 requirement; do not change sample rate
+
+## Opening hook overlay
+
+Conversational source rarely opens on a punchy spoken line, and retention analysis showed
+clips that present a concrete claim up front hold far better — so the hook lives ON SCREEN.
+`export_clip(..., hook_text=...)` renders a bold, rounded, opaque Montserrat-ExtraBold card
+(`render_hook_card`, Pillow) and overlays it on the first `HOOK_SECS` (3.5s) via filter_complex.
+`run_shorts_season` passes each clip's `hook` when the active profile's `pipeline.hook_overlay`
+is true (default). Multi-line text MUST be built in-memory (Pillow), not via a drawtext textfile —
+Windows CRLF in a textfile renders the line break as tofu rectangles.
 
 ## Tests
 

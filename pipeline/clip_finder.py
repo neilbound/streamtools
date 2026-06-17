@@ -145,10 +145,13 @@ Also look for:
 Transcript:
 {timestamped}
 
+Also give each clip a "hook": a punchy on-screen hook line of AT MOST 5 words (all-caps friendly) stating the clip's single most arresting claim/fact/number — it is burned onto the opening frames to grab viewers regardless of the spoken lead-in. Examples: "HER SON IS OLDER THAN HIM", "27-YEAR AGE GAP", "HE LOVE-BOMBED HER ON DAY ONE". Make it concrete and specific, not vague ("A WILD MOMENT" is bad).
+
 Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds as floats:
 [
   {{
     "title": "Short descriptive title",
+    "hook": "PUNCHY <=5 WORD HOOK",
     "start_time": 12.0,
     "end_time": 67.0,
     "reason": "Why this segment works as a clip",

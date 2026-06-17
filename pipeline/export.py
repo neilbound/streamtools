@@ -73,6 +73,75 @@ def _description_filter(description: str, font_basename: str) -> str:
     return f"{bar},{text}"
 
 
+# ── Opening hook overlay ────────────────────────────────────────────────────────
+# Conversational source audio rarely opens on a punchy line, so the hook lives on
+# screen: a bold, rounded, opaque card flashed over the first few seconds. Retention
+# analysis showed clips that present a concrete claim up front hold far better.
+
+HOOK_SECS = 3.5            # how long the card stays on screen
+HOOK_Y    = "main_h*0.10"  # vertical position (overlay expr); upper area, clear of captions
+
+
+def _hook_font(size: int):
+    """Montserrat ExtraBold (brand caption font) for the hook card, with fallbacks."""
+    from PIL import ImageFont
+    import glob
+    user_fonts = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "Windows", "Fonts")
+    for d in (r"C:\Windows\Fonts", user_fonts):
+        for vf in glob.glob(os.path.join(d, "Montserrat*VariableFont*wght*.ttf")):
+            if "Italic" in vf:
+                continue
+            f = ImageFont.truetype(vf, size)
+            try:
+                f.set_variation_by_name("ExtraBold")
+            except Exception:
+                pass
+            return f
+    fallback = _find_badge_font() or "arial.ttf"
+    return ImageFont.truetype(fallback, size)
+
+
+def _wrap_hook(text: str, max_chars: int = 16) -> str:
+    """Uppercase the hook and greedily wrap to <=3 short lines for a balanced card."""
+    words = text.upper().split()
+    lines, cur = [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > max_chars:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}".strip()
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines[:3])
+
+
+def render_hook_card(text: str, out_path: str, font_size: int = 62) -> tuple[int, int]:
+    """
+    Render an opaque, rounded hook card (Montserrat ExtraBold, white text, soft drop
+    shadow) as a transparent PNG for overlaying on a clip's opening. Returns (w, h).
+    """
+    from PIL import Image, ImageDraw, ImageFilter
+    wrapped = _wrap_hook(text)
+    font = _hook_font(font_size)
+    padx, pady, radius, pad = 46, 32, 30, 18
+    measure = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    bb = measure.multiline_textbbox((0, 0), wrapped, font=font, align="center", spacing=12)
+    tw, th = int(bb[2] - bb[0]), int(bb[3] - bb[1])
+    cw, ch = tw + 2 * padx, th + 2 * pady
+    img = Image.new("RGBA", (cw + pad * 2, ch + pad * 2), (0, 0, 0, 0))
+    shadow = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle(
+        [pad + 3, pad + 7, pad + cw + 3, pad + ch + 7], radius=radius, fill=(0, 0, 0, 160))
+    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(8)))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([pad, pad, pad + cw, pad + ch], radius=radius, fill=(18, 18, 20, 255))
+    draw.multiline_text((pad + padx - bb[0], pad + pady - bb[1]), wrapped, font=font,
+                        fill=(255, 255, 255, 255), align="center", spacing=12)
+    img.save(out_path)
+    return img.size
+
+
 def _run_ffmpeg(
     cmd: list[str],
     cwd: str | None = None,
@@ -131,10 +200,12 @@ def export_clip(
     end: float,
     output_path: str,
     description: str = "",
+    hook_text: str = "",
 ) -> str:
     """
     Cut a clip and export with cleaned audio, burned-in karaoke captions,
-    and an optional chyron bar at the bottom for the description.
+    an optional chyron bar at the bottom for the description, and an optional
+    bold "hook" card flashed over the first few seconds (hook_text).
 
     The video source must already be in its final aspect ratio — the shorts
     pipeline sources clips from the vertical StreamYard file (already 9:16).
@@ -156,20 +227,31 @@ def export_clip(
             font_basename = os.path.basename(font_src)
             shutil.copy2(font_src, os.path.join(tmp_dir, font_basename))
 
-        vf = "ass=st_caps.ass"
         desc_filter = _description_filter(description, font_basename)
-        if desc_filter:
-            vf = f"{vf},{desc_filter}"
+        base_chain = "ass=st_caps.ass" + (f",{desc_filter}" if desc_filter else "")
 
         cmd = [_FFMPEG_EXE, "-y",
                "-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", video_path]
+        audio_in = "0:a:0"
         if clean_audio_path:
             cmd += ["-accurate_seek", "-ss", str(start), "-t", str(duration), "-i", clean_audio_path]
-            cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+            audio_in = "1:a:0"
+
+        if hook_text:
+            # Render the hook card and composite it over the first HOOK_SECS via
+            # filter_complex (an image overlay needs an extra input, not -vf).
+            card = os.path.join(tmp_dir, "hook_card.png")
+            render_hook_card(hook_text, card)
+            card_idx = 2 if clean_audio_path else 1
+            cmd += ["-i", card]
+            fc = (f"[0:v]{base_chain}[base];"
+                  f"[base][{card_idx}:v]overlay=(main_w-overlay_w)/2:{HOOK_Y}:"
+                  f"enable='lt(t,{HOOK_SECS})'[out]")
+            cmd += ["-filter_complex", fc, "-map", "[out]", "-map", audio_in]
         else:
-            cmd += ["-map", "0:v:0", "-map", "0:a:0"]
-        cmd += ["-vf", vf,
-                "-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
+            cmd += ["-map", "0:v:0", "-map", audio_in, "-vf", base_chain]
+
+        cmd += ["-vcodec", "libx264", "-acodec", "aac", "-b:a", "192k",
                 "-crf", "18", "-preset", "fast", "-movflags", "+faststart",
                 output_path]
         _run_ffmpeg(cmd, cwd=tmp_dir, expected_output=output_path)

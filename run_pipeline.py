@@ -1325,11 +1325,15 @@ def run_shorts_season(
                     ass_path    = os.path.join(paths["clips"], f"{slug}.ass")
                     build_karaoke_ass(clip_words, style, ass_path,
                                       start_offset=start)
+                    # Opening hook card (only when enabled and the clip-finder
+                    # supplied a hook) — punchy claim on the first few seconds.
+                    hook_text = (clip.get("hook", "").strip()
+                                 if pipeline_cfg.get("hook_overlay") else "")
                     # Vertical source is already portrait; audio and video come
                     # from the same file — zero drift, no layout transform.
                     export_clip(
                         clip_video_src, clip_audio_path, ass_path,
-                        start, end, social_path, description,
+                        start, end, social_path, description, hook_text=hook_text,
                     )
                     clip_files["social"] = social_path
 
