@@ -167,7 +167,7 @@ def enqueue(
         )
         print(
             f"[publish_queue] WARNING: TikTok caption is {len(tiktok_cap)} chars "
-            f"(best practice ≤ 150) — consider shortening"
+            f"(best practice <= 150) — consider shortening"
         )
 
     ig_cap = (extra or {}).get("instagram_caption", description)
@@ -179,7 +179,7 @@ def enqueue(
             )
             print(
                 f"[publish_queue] WARNING: Instagram caption has {hashtag_count} hashtags "
-                f"(max 30, best practice ≤ 28)"
+                f"(max 30, best practice <= 28)"
             )
 
     # All read-modify-write of the queue happens under the cross-process lock.
