@@ -51,6 +51,49 @@ def _snap_start(words: list[dict], t: float, tolerance: float = 3.0) -> float:
     return candidates[0]["start"] if candidates else t
 
 
+# Leading discourse-marker / filler tokens that make a Shorts opening weak.
+# Trimming these so a clip OPENS on its first substantive word measurably helps
+# retention (the first ~3s decide the swipe). Conservative: only consecutive
+# leading filler is removed, capped, and never the whole opening sentence.
+_FILLER_OPENERS = {
+    "so", "yeah", "yes", "well", "okay", "ok", "um", "uh", "uhh", "hmm", "oh",
+    "like", "and", "but", "anyway", "anyways", "right", "now", "look", "see",
+}
+_FILLER_PHRASES = (
+    ("by", "the", "way"), ("you", "know"), ("i", "mean"), ("i", "think"),
+    ("i", "guess"), ("i", "don't", "know"), ("kind", "of"), ("sort", "of"),
+)
+
+
+def _trim_leading_filler(words: list[dict], start: float, end: float,
+                         max_trim: float = 4.0) -> float:
+    """
+    Advance `start` past leading filler so the clip opens on a substantive word.
+    Removes consecutive leading filler tokens and known filler phrases, stopping at
+    the first content word. Never trims more than `max_trim` seconds and always
+    leaves the bulk of the clip intact. Returns the (possibly later) start time.
+    """
+    clip = [w for w in words if start - 0.01 <= w["start"] < end]
+    if len(clip) < 6:
+        return start  # too short to safely trim
+    i = 0
+    norm = [w["word"].lower().strip(".,!?\"' ") for w in clip]
+    limit = start + max_trim
+    while i < len(clip) - 4 and clip[i]["start"] <= limit:
+        # try multi-word filler phrases first
+        matched = False
+        for ph in _FILLER_PHRASES:
+            if tuple(norm[i:i + len(ph)]) == ph:
+                i += len(ph); matched = True; break
+        if matched:
+            continue
+        if norm[i] in _FILLER_OPENERS:
+            i += 1
+            continue
+        break
+    return clip[i]["start"] if i > 0 else start
+
+
 def _snap_end(words: list[dict], t: float, tolerance: float = 3.0, pause: float = 0.4) -> float:
     """Snap t to just after the last word ending at or before t (within tolerance lookahead)."""
     candidates = [w for w in words if w["end"] <= t + tolerance]
@@ -85,8 +128,14 @@ def find_clips(transcript: dict, video_duration: float, producer_context: str = 
 
     prompt = f"""The video is {duration_min}m {duration_sec}s long. Below is the transcript with timestamps in [MM:SS] format every ~15 words. Use these timestamps as anchors when setting start_time and end_time — pick values that correspond to real timestamp markers so clips begin and end at natural sentence boundaries.
 
-Your task: identify 3 to 5 self-contained segments that would work well as YouTube Shorts or social media clips ({min_clip_secs}–{max_clip_secs} seconds each). Look for:
-- Strong, punchy openings (no mid-sentence starts — begin right at a [MM:SS] marker or just after)
+Your task: identify 3 to 5 self-contained segments that would work well as YouTube Shorts or social media clips ({min_clip_secs}–{max_clip_secs} seconds each).
+
+THE OPENING IS THE MOST IMPORTANT THING. On Shorts the first 1–3 seconds decide whether viewers stay or swipe. Data from this channel: clips that open on a specific claim, fact, or number retain ~40%; clips that open mid-conversation on filler retain ~22%. So:
+- The FIRST sentence of each clip must state a concrete claim, judgment, fact, name, or number that hooks immediately (e.g. "Andrew is 38, Libby is 22" or "This show is candy land for creeps").
+- Do NOT start a clip on filler or throat-clearing: never begin with "so", "yeah", "well", "I think", "I mean", "you know", "by the way", "anyway", "like", "and", "but", or any mid-thought fragment. Move start_time to where the strong statement actually begins.
+- Pick start_time at a [MM:SS] marker where a punchy, self-contained sentence starts.
+
+Also look for:
 - A clear single idea, insight, or story
 - Natural ending points (end after a complete sentence, not mid-thought)
 - High energy or quotable moments
@@ -164,6 +213,9 @@ Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds
         # Snap start/end to real word boundaries so clips don't cut mid-sentence
         snapped_start = _snap_start(words, raw_start)
         snapped_end   = _snap_end(words, raw_end)
+
+        # Open on a substantive word, not "so/yeah/by the way" — first 3s drive retention
+        snapped_start = _trim_leading_filler(words, snapped_start, snapped_end)
 
         # Enforce max duration after snapping — snap can overshoot when Claude
         # already returned a clip near the max and snap extends to the next sentence.
