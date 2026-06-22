@@ -215,6 +215,12 @@ to cold storage (a Google Drive for Desktop synced folder) to free local disk.
   (retention `averageViewPercentage`, avg view duration, subscribers, shares) needs the
   **`yt-analytics.readonly`** scope — one re-auth via `setup_credentials.py`. `fetch_video_analytics`
   degrades gracefully (returns `{}`) until the scope is granted, so Tier 1 always works.
+- **GOTCHA (separate from the scope):** Tier 2 also requires the **YouTube Analytics API to be
+  enabled in the GCP project** (console → Enable API). A 403 saying "API has not been used in
+  project … or it is disabled" means enable the API — NOT another re-auth. The scope grants
+  permission; the API toggle is independent. (Both are now done; Tier 2 retention is live.)
+- A manual `refresh_analytics` forces a same-day re-snapshot (`snapshot(force=True)`) so a pull
+  right after enabling Tier 2 captures retention without waiting for the next daily run.
 - **Daily snapshots:** the daemon's `_maybe_snapshot()` (once/24h, mirrors `_maybe_reconcile`)
   appends one row/video/day to `output/analytics/snapshots.jsonl` — a growth time series so
   videos can be compared at the **same age** (Shorts accrue views over days; never rank raw

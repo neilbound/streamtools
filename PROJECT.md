@@ -61,8 +61,16 @@ episodes to YouTube, Instagram, and TikTok on a schedule (see *Publishing & Dist
 | Auto-retry + backoff | ✅ Working | Failed platforms retry 30/60/120 min, cap 4 attempts |
 | Episode descriptions | ✅ Working | `pipeline/describe.py` — Claude-generated YouTube/Spotify copy |
 | QA validation | ✅ Working | `pipeline/validate.py` — per-clip checks before scheduling |
+| Upload self-healing | ✅ Working | YouTube timeout-recovery + truncation detect/retry; playlist-add retry |
+| Reconciliation | ✅ Working | `reconcile_youtube()` audits posted vs channel; daemon runs daily |
+| Drive archive | ✅ Working | `pipeline/archive.py` — per-episode deliverable move to Drive folder |
+| Performance analytics | ✅ Working | `pipeline/analytics.py` — views/engagement + retention; daily snapshots |
+| Opening hook overlay | ✅ Working | bold hook card on first 3.5s (`render_hook_card`); clip-finder emits `hook` |
+| Test suite | ✅ Working | `tests/` — 104 pure-Python tests (`pytest tests -q`) |
 
-\* TikTok requires per-channel dev credentials; unaudited apps post `SELF_ONLY` (see Publishing).
+\* TikTok (`ilb`) posts via **inbox mode** (`video.upload`): clip lands in the account's
+drafts, operator taps Post in the mobile app. Direct public auto-post needs a TikTok audit
++ domain verification (deferred). See Publishing.
 
 ---
 
@@ -257,13 +265,20 @@ streamtools/
     audio_clean.py        DeepFilterNet3: 48kHz GPU speech enhancement
     filter.py             Profanity detection, audio bleep, transcript censor
     captions.py           ASS karaoke builder + SRT builder
-    export.py             FFmpeg: compose_portrait, export_clip(_clean), stitch_segments, episode export
-    clip_finder.py        Claude: suggest clips from transcript
+    export.py             FFmpeg: compose_portrait, export_clip(_clean), stitch_segments,
+                          episode export, render_hook_card (opening hook overlay)
+    clip_finder.py        Claude: suggest clips (+ per-clip hook); filler-trim openings
     describe.py           Claude: episode + per-clip platform descriptions
-    validate.py           Per-clip QA checks (timing, transcript coverage)
+    validate.py           Per-clip QA checks (timing, transcript coverage, black/silence)
     podcast.py            Podcast MP3 export (ID3 tags) for Spotify
-    publish.py            Platform uploaders: YouTube, Instagram Reels, TikTok
-    publish_queue.py      JSON publish queue: enqueue, get_due, get_retryable, schedule_retry, FileLock
+    publish.py            Platform uploaders: YouTube (self-healing) / Instagram / TikTok;
+                          reconcile_youtube() channel audit
+    publish_queue.py      JSON publish queue: enqueue, get_due, get_retryable, schedule_retry,
+                          find_schedule_gaps, FileLock
+    analytics.py          YouTube stats + retention snapshots (Data + Analytics APIs); report()
+    archive.py            Move posted-episode deliverables to a Drive-synced folder
+  tests/                  Pure-Python test suite (no network/ffmpeg/GPU) — pytest tests -q
+  scheduled-tasks/        (~/.claude) cron tasks: john-cohort-retention-check, weekly-stats-deep-dive
 ```
 
 ---
@@ -446,9 +461,14 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
       audit ok'd entries against the channel; daemon runs it once/24h (`_maybe_reconcile`).
 - [x] ~~**Channel performance analytics**~~ — built (`pipeline/analytics.py` + `refresh_analytics`,
       `performance_report`, `video_performance` MCP tools). Daily snapshot time series
-      (`output/analytics/snapshots.jsonl`); leaderboards + group-bys (couple, weekday, hour, length).
-      Tier 1 (views/likes/comments) live; Tier 2 (retention/subscribers) needs the one-time
-      `yt-analytics.readonly` re-auth. *Pending: operator re-auth for Tier 2.*
+      (`output/analytics/snapshots.jsonl`); leaderboards + group-bys. **Tier 2 (retention) live** —
+      needed the `yt-analytics.readonly` scope AND enabling the YouTube Analytics API in the GCP
+      project (separate step). Daemon runs `reconcile_uploads` daily; scheduled deep-dive task weekly.
+- [x] ~~**Opening hook overlay + clip-opening optimization**~~ — retention data showed clips opening on
+      a concrete claim retain ~40% vs ~22% for filler openers, but conversational source rarely opens
+      punchy. So: hardened clip-finder (concrete-hook prompt + `_trim_leading_filler`), and an on-screen
+      bold hook card on the first 3.5s (`render_hook_card` + `export_clip(hook_text=)`, clip-finder emits
+      a `hook`, `pipeline.hook_overlay` flag). Rolled to all remaining shorts; under measurement.
 - [ ] **Instagram analytics** — Reel insights (reach, plays, saves, shares) via the Graph API for
       cross-platform comparison (deferred; YouTube-only for now).
 - [ ] **Daemon supervision** — Task Scheduler works but is fragile (was found *Disabled*, causing a
@@ -465,3 +485,31 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
 - [ ] **Speaker diarization** — Deepgram `diarize=True`
 - [ ] **Resemble Enhance via WSL** — best audio quality; blocked on Windows by deepspeed/libaio
 - [ ] **Caption presets** — save/load named styles beyond per-show profiles
+
+---
+
+## History
+
+Reverse-chronological log of major milestones. Operational gotchas live in CLAUDE.md.
+
+- **2026-06-22** — Rolled the hardened finder + hook overlay to all remaining shorts
+  (John / Jorge / Logan = the "new-approach" cohort, posting Jun 19–27) vs the older baseline.
+  Performance finding: Chris & Leah retain ~44% but get few views → a *distribution* problem,
+  not hooks. Scheduled tasks added: one-time new-vs-old retention check + weekly stats deep-dive.
+- **2026-06-17** — Channel **performance analytics** (`analytics.py`: Tier-1 stats + Tier-2
+  retention via the YouTube Analytics API; daily snapshots; `report()` + MCP tools). Data showed
+  openings drive retention → **clip-opening optimization** (concrete-hook prompt + filler-trim) and
+  an **on-screen hook overlay** (`render_hook_card`). Cadence cut to **1 short/day at 6pm**.
+  Fixed `config.py` UTF-8 read/write (Windows cp1252 crash on curly quotes).
+- **2026-06-12** — Reliability pass: **upload self-healing** (timeout recovery + truncation
+  detect/retry), **daily reconciliation**, daemon **run-lock** (no overlap double-posts),
+  **schedule gap-check**, **Drive archive** (`archive.py`), fatal-vs-retryable retry classification,
+  pre-publish **QA gate** (`validate.py`), and a pure-Python **test suite**. **TikTok inbox mode**
+  working for `ilb`. Root-caused the recurring outages: publish-when-due (past `publishAt`),
+  playlist scope, wrong-channel (`ilb` = a separate Google login, not a brand account), and the
+  OAuth consent screen needing **Production** status (Testing = 7-day token expiry).
+- **2026-05** — **Shorts-season** pipeline (three-layer: shorts + per-segment videos in both
+  orientations + stitched episode; independent vertical sub-pipeline = zero H/V drift),
+  **broadcast** pipeline, **publish queue + daemon**, **MCP server**, per-show `pipeline` config.
+- **Earlier** — Core local pipeline (compose → clean → transcribe → find clips → caption → export)
+  and the Streamlit UI.
