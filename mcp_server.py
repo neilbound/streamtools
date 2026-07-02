@@ -27,6 +27,12 @@ import os
 import subprocess
 import sys
 
+# Windows consoles default to cp1252 — emoji/box-drawing chars in tool output have
+# crashed real runs. UTF-8 is also what the MCP JSON-RPC stdio transport expects.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
@@ -687,6 +693,24 @@ def list_scheduled_clips() -> str:
 
     # ── NEEDS ATTENTION: failures, partials, unposted TikTok drafts, warnings ──
     attention: list[str] = []
+
+    # Daemon proof-of-life: a stale heartbeat while posts are pending means the
+    # Task Scheduler task is disabled/broken — the failure mode that once caused
+    # a multi-day silent posting gap.
+    has_pending = any(e.get("status") in ("pending", "partial") for e in entries)
+    if has_pending:
+        from publisher_daemon import HEARTBEAT_STALE_SECS, heartbeat_age_seconds
+        age = heartbeat_age_seconds()
+        if age is None:
+            attention.append(
+                "  DAEMON: no heartbeat recorded yet — verify the Task Scheduler "
+                "task 'streamtools publisher' is enabled and running every 15 min")
+        elif age > HEARTBEAT_STALE_SECS:
+            attention.append(
+                f"  DAEMON STALE: last ran {age / 3600:.1f}h ago (expected every "
+                f"15 min) — check Task Scheduler: the task may be disabled, or "
+                f"the PC was off/asleep. Pending posts are NOT being published.")
+
     for e in entries:
         post_id = e.get("post_id", "?")
         title   = e.get("title", "(no title)")

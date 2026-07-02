@@ -1,6 +1,12 @@
 """
 streamtools — Video Content Pipeline
 Streamlit UI: Source → Enhance → Full Episode → Clips
+
+DEPRECATED (2026-07): this UI predates the shorts-season pipeline, the opening
+hook overlay, per-segment dual-orientation exports, and the per-show config
+`pipeline` block — clips exported here BYPASS those features. Use the MCP tools
+(process_shorts_season / process_broadcast_episode) or run_pipeline.py instead.
+Kept for ad-hoc single-clip experiments only.
 """
 
 import io
@@ -8,7 +14,14 @@ import json
 import os
 import shutil
 import subprocess as _sp
+import sys
 import zipfile
+
+# Windows consoles default to cp1252 — emoji/box-drawing chars in printed
+# output have crashed real runs elsewhere in the toolchain.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 import pandas as pd
 import streamlit as st
@@ -70,6 +83,12 @@ except Exception:
 st.title("streamtools")
 _branch_badge = f"  `{_branch}`" if _branch != "master" else ""
 st.caption(f"Source → Enhance → Full Episode → Clips{_branch_badge}")
+st.warning(
+    "**This UI is deprecated.** It predates the shorts-season pipeline, opening hook "
+    "overlays, and per-segment exports — clips exported here bypass those features. "
+    "Use the MCP tools (`process_shorts_season`) or `run_pipeline.py` for production work.",
+    icon="⚠️",
+)
 
 # ── Sidebar — Show profiles + caption style ───────────────────────────────────
 

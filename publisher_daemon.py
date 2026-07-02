@@ -17,6 +17,13 @@ from logging.handlers import RotatingFileHandler
 
 from filelock import FileLock, Timeout
 
+# Windows consoles default to cp1252 — a single emoji or box-drawing char in
+# printed output has crashed real runs. Force UTF-8 with replacement so console
+# encoding can never kill the daemon. (The rotating file log is already utf-8.)
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # Add project root to sys.path so pipeline/ is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -139,6 +146,39 @@ _RUN_LOCK = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "output", "publisher_daemon.run.lock"
 )
 
+# Heartbeat: proof-of-life written at the start of EVERY run (even no-op runs).
+# The Task Scheduler task was once found silently Disabled, causing a multi-day
+# posting gap — a stale heartbeat is how that failure mode gets surfaced
+# (list_scheduled_clips checks it in its NEEDS ATTENTION section).
+HEARTBEAT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "output", ".last_daemon_heartbeat"
+)
+# Daemon runs every 15 min; >60 min stale means at least 3 missed runs.
+HEARTBEAT_STALE_SECS = 3600
+
+
+def write_heartbeat(now=None):
+    """Record that the daemon executed. Never raises — a heartbeat failure must
+    not break a publishing run."""
+    try:
+        ts = (now or datetime.now(tz=timezone.utc)).timestamp()
+        os.makedirs(os.path.dirname(HEARTBEAT_PATH), exist_ok=True)
+        with open(HEARTBEAT_PATH, "w") as f:
+            f.write(str(ts))
+    except Exception:
+        pass
+
+
+def heartbeat_age_seconds(now=None) -> float | None:
+    """Seconds since the daemon last ran, or None if it has never written one."""
+    try:
+        with open(HEARTBEAT_PATH) as f:
+            last = float(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    ref = (now or datetime.now(tz=timezone.utc)).timestamp()
+    return max(0.0, ref - last)
+
 
 def main():
     os.makedirs(os.path.dirname(_RUN_LOCK), exist_ok=True)
@@ -227,6 +267,7 @@ def _maybe_snapshot():
 
 def _run():
     now = datetime.now(tz=timezone.utc)
+    write_heartbeat(now)
     log.info("Starting at %s", now.isoformat())
 
     publishing_enabled = os.environ.get("PUBLISHING_ENABLED", "").lower() == "true"
