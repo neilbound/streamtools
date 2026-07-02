@@ -26,6 +26,12 @@ import sys
 import traceback
 from datetime import datetime
 
+# Windows consoles default to cp1252 — a single emoji or box-drawing char in
+# printed output (hooks, titles, progress banners) has crashed real runs.
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(__file__))
 
 from dotenv import load_dotenv

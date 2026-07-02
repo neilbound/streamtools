@@ -1,40 +1,45 @@
-# Transcription — Deepgram Nova-3 cloud API (replaces local WhisperX)
-deepgram-sdk>=3.0.0
+# Compatible-release pins (~=) per root CLAUDE.md dependency rules; the exact
+# versions verified working on this machine are in the trailing comments.
+# NOTE: DeepFilterNet3 + PyTorch are installed separately (see PROJECT.md) —
+# do not add them here. After installing deepfilternet, reinstall numpy>=2.1.0.
 
-# Audio cleanup — AI speech denoising (DeepFilterNet3, GPU-accelerated)
-# Install separately: see PROJECT.md for PyTorch + deepfilternet install steps
+# Transcription — Deepgram Nova-3 cloud API
+deepgram-sdk~=7.1              # 7.1.0
 
-# Claude API — clip selection
-anthropic>=0.40.0
+# Claude API — clip selection + descriptions
+anthropic~=0.86                # 0.86.0
 
 # FFmpeg Python bindings — video probe / duration
-ffmpeg-python>=0.2.0
+ffmpeg-python~=0.2             # 0.2.0
 
-# Streamlit — local browser UI
-streamlit>=1.40.0
+# Streamlit — local browser UI (app.py, deprecated but kept)
+streamlit~=1.55                # 1.55.0
 
 # Audio I/O backend
-soundfile>=0.12.0
+soundfile~=0.13                # 0.13.1
 
 # Environment variable loading
-python-dotenv>=1.0.0
+python-dotenv~=1.2             # 1.2.2
 
 # Profanity filtering
-better-profanity>=0.7.0
+better-profanity~=0.7          # 0.7.0
 
 # Data table in review UI
-pandas>=2.0.0
+pandas~=2.3                    # 2.3.3
 
 # MCP server — Claude Desktop Cowork integration
-mcp>=1.0.0
+mcp~=1.27                      # 1.27.1
 
-# Social media publishing — YouTube Shorts upload
-google-api-python-client>=2.100.0
-google-auth>=2.23.0
-google-auth-oauthlib>=1.1.0
+# Cross-process locks — publish queue + daemon run-lock
+filelock~=3.20                 # 3.20.0
+
+# Social media publishing — YouTube upload + OAuth
+google-api-python-client~=2.196  # 2.196.0
+google-auth~=2.53              # 2.53.0
+google-auth-oauthlib~=1.4      # 1.4.0
 
 # Podcast MP3 export — ID3 tag writing
-mutagen>=1.47.0
+mutagen~=1.47                  # 1.47.0
 
 # Dev / testing
-pytest>=8.0.0
+pytest~=9.0                    # 9.0.3
