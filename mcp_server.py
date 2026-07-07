@@ -527,7 +527,7 @@ def schedule_clip(
     title: str,
     description: str = "",
     scheduled_time: str = "",
-    tags: list[str] = [],
+    tags: list[str] = [],  # noqa: B006 — read-only; empty-list default is fine here
     channel: str = "neilbound",
     force: bool = False,
 ) -> str:
@@ -609,7 +609,7 @@ def publish_clip_now(
     platforms: list[str],
     title: str,
     description: str = "",
-    tags: list[str] = [],
+    tags: list[str] = [],  # noqa: B006 — read-only; empty-list default is fine here
     channel: str = "neilbound",
     force: bool = False,
 ) -> str:
@@ -1076,7 +1076,7 @@ def process_broadcast_episode(
     episode_title: str = "",
     episode_notes: str = "",
     show_name: str = "",
-    local_recordings: list[str] = [],
+    local_recordings: list[str] = [],  # noqa: B006 — read-only
     min_clip: int = 45,
     max_clip: int = 50,
     export_format: str = "both",
@@ -1519,8 +1519,8 @@ def review_episode_clips(episode_dir_path: str) -> str:
 def schedule_episode_clips(
     episode_dir_path: str,
     channel: str = "",   # empty → active profile's pipeline.default_channel
-    platforms: list[str] = ["youtube", "tiktok", "instagram"],
-    description_overrides: dict = {},
+    platforms: list[str] = ["youtube", "tiktok", "instagram"],  # noqa: B006 — advertised default, read-only
+    description_overrides: dict = {},  # noqa: B006 — read-only
     start_date: str = "",
     day_interval: int = 1,
     force: bool = False,

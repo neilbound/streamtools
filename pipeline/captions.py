@@ -46,7 +46,9 @@ def build_karaoke_ass(
     font_size = style.get("font_size", 18)
     primary = style.get("primary_color", "&H00FFFFFF")
     highlight = style.get("highlight_color", "&H0000FFFF")
-    bg_color = style.get("bg_color", "&H80000000")
+    # NB: captions use the outline style (BorderStyle 1 + thick Outline), not a background
+    # box — so there's no bg_color/BackColour knob. Add BorderStyle 3 + BackColour below if a
+    # boxed-caption look is ever wanted.
     bold = -1 if style.get("bold", True) else 0
     margin_v = style.get("margin_v", 40)
 
