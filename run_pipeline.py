@@ -193,7 +193,7 @@ def run(
         max_clip=max_clip,
     )
     print(f"\n{'='*60}")
-    print(f"  streamtools pipeline")
+    print("  streamtools pipeline")
     print(f"  Episode : {episode_id}")
     print(f"  Show    : {show_name}")
     print(f"  Output  : {ep_dir}")
@@ -210,14 +210,14 @@ def run(
             else:
                 video_path = source_paths[0]
                 write_status(status_path, compose={"message": "Single source, skipped", "output": video_path})
-                print(f"[compose] Single source file — skipping compose")
+                print("[compose] Single source file — skipping compose")
         else:
             # Resume: find existing portrait or use source
             if os.path.exists(paths["portrait"]):
                 if valid_intermediate(paths["portrait"], "video"):
                     video_path = paths["portrait"]
                 else:
-                    print(f"[compose] WARNING: portrait.mp4 exists but is invalid — ignoring it")
+                    print("[compose] WARNING: portrait.mp4 exists but is invalid — ignoring it")
                     video_path = source_paths[0]
             else:
                 video_path = source_paths[0]
@@ -369,12 +369,12 @@ def run(
             },
         )
         print(f"\n{'='*60}")
-        print(f"  Pipeline complete!")
+        print("  Pipeline complete!")
         print(f"  {len(exported)} clip(s) exported to: {paths['clips']}")
         if qa_failures:
             print(f"  QA: {qa_failures} clip(s) have issues — review before scheduling!")
         else:
-            print(f"  QA: all clips passed")
+            print("  QA: all clips passed")
         print(f"{'='*60}\n")
         return ep_dir
 
@@ -456,7 +456,7 @@ def run_broadcast(
         max_clip=max_clip,
     )
     print(f"\n{'='*60}")
-    print(f"  streamtools broadcast pipeline")
+    print("  streamtools broadcast pipeline")
     print(f"  Episode : {episode_id}")
     print(f"  Title   : {episode_title}")
     print(f"  Show    : {show_name}")
@@ -475,7 +475,7 @@ def run_broadcast(
             else:
                 episode_video_src = horizontal_path
                 write_status(status_path, compose={"message": "No local recordings — using horizontal", "output": horizontal_path})
-                print(f"[compose] No local recordings — using horizontal StreamYard download")
+                print("[compose] No local recordings — using horizontal StreamYard download")
         else:
             episode_video_src = paths["portrait"] if valid_intermediate(paths["portrait"], "video") else horizontal_path
             print(f"[compose] Skipped (resuming) — using {episode_video_src}")
@@ -579,7 +579,7 @@ def run_broadcast(
             else:
                 print(f"[episode_mp3] Skipped (resuming) — {paths['episode_mp3']}")
         else:
-            print(f"[episode_mp3] Skipped — upload video episode to Spotify directly")
+            print("[episode_mp3] Skipped — upload video episode to Spotify directly")
 
         # ── Step 8: Episode descriptions ──────────────────────────────────────
         if not export_only or not os.path.exists(paths["episode_desc"]):
@@ -707,7 +707,7 @@ def run_broadcast(
             spotify_upload_url=spotify_url,
         )
         print(f"\n{'='*60}")
-        print(f"  Broadcast pipeline complete!")
+        print("  Broadcast pipeline complete!")
         print(f"  Full episode : {paths['episode_video']}")
         if generate_mp3:
             print(f"  Podcast MP3  : {paths['episode_mp3']}")
@@ -927,7 +927,7 @@ def run_shorts_season(
         max_clip=max_clip,
     )
     print(f"\n{'='*60}")
-    print(f"  streamtools shorts season pipeline")
+    print("  streamtools shorts season pipeline")
     print(f"  Episode  : {episode_id}")
     print(f"  Title    : {episode_title}")
     print(f"  Show     : {show_name}")
@@ -1177,7 +1177,7 @@ def run_shorts_season(
             _log(status_path, "episode_export", "Done",
                  output=paths["episode_video"])
         else:
-            print(f"[episode_export] Skipped — already exists")
+            print("[episode_export] Skipped — already exists")
 
         # ── Step 6: Full episode SRT ───────────────────────────────────────────
         if not os.path.exists(paths["episode_srt"]):
@@ -1185,7 +1185,7 @@ def run_shorts_season(
             build_srt(transcript["words"], paths["episode_srt"], start_offset=0.0)
             _log(status_path, "episode_srt", "Done", output=paths["episode_srt"])
         else:
-            print(f"[episode_srt] Skipped — already exists")
+            print("[episode_srt] Skipped — already exists")
 
         # ── Step 7: Podcast MP3 (optional) ────────────────────────────────────
         if generate_mp3:
@@ -1204,9 +1204,9 @@ def run_shorts_season(
                      output=paths["episode_mp3"],
                      spotify_upload_url=mp3_result["spotify_upload_url"])
             else:
-                print(f"[episode_mp3] Skipped — already exists")
+                print("[episode_mp3] Skipped — already exists")
         else:
-            print(f"[episode_mp3] Skipped — upload video episode to Spotify directly")
+            print("[episode_mp3] Skipped — upload video episode to Spotify directly")
 
         # ── Step 8: Episode descriptions ──────────────────────────────────────
         if not os.path.exists(paths["episode_desc"]):
@@ -1233,7 +1233,7 @@ def run_shorts_season(
                  episode_desc=paths["episode_desc"],
                  episode_notes=paths["episode_notes"])
         else:
-            print(f"[describe] Skipped — already exists")
+            print("[describe] Skipped — already exists")
 
         # ── Steps 9–11: Per-segment clip finding and export ────────────────────
         all_exported: list[dict] = []
@@ -1466,7 +1466,7 @@ def run_shorts_season(
             spotify_upload_url=spotify_url,
         )
         print(f"\n{'='*60}")
-        print(f"  Shorts season pipeline complete!")
+        print("  Shorts season pipeline complete!")
         print(f"  Full episode : {paths['episode_video']}")
         orientations = "vertical + horizontal" if use_vertical else "horizontal"
         print(f"  Segments     : {paths['segments_dir']} ({orientations})")
@@ -1476,7 +1476,7 @@ def run_shorts_season(
         if qa_failures:
             print(f"  QA: {qa_failures} clip(s) have issues — review before scheduling")
         else:
-            print(f"  QA: all clips passed")
+            print("  QA: all clips passed")
         print(f"\n  >> Upload episode video to Spotify: {spotify_url}")
         print(f"{'='*60}\n")
         return ep_dir

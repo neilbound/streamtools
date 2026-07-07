@@ -420,8 +420,7 @@ def run_full_pipeline(
     )
 
     # Determine expected status file path so caller can poll it
-    from pipeline.episode import episode_dir, slugify
-    from datetime import date
+    from pipeline.episode import episode_dir
     import config as _cfg
     cfg = _cfg.load()
     sn  = show_name or cfg.get("active_profile", "podcast")
@@ -585,7 +584,7 @@ def schedule_clip(
     )
 
     lines = [
-        f"Queued for publishing.",
+        "Queued for publishing.",
         f"post_id   : {post_id}",
         f"Platforms : {', '.join(platforms)}",
         f"Scheduled : {scheduled_time}",
@@ -638,7 +637,6 @@ def publish_clip_now(
     """
     from pipeline.publish import upload_youtube, upload_tiktok, upload_instagram
     from pipeline.validate import validate_media
-    import traceback as _tb
 
     # deep=True: catches truncated files that pass probe-only checks (see
     # schedule_clip). ~2s — negligible next to a 30-120s upload.
@@ -1403,7 +1401,7 @@ def upload_episode_to_youtube(
             channel=channel,
         )
         lines = [
-            f"Episode uploaded to YouTube.",
+            "Episode uploaded to YouTube.",
             f"  URL       : {result['url']}",
             f"  Video ID  : {result['video_id']}",
             f"  Scheduled : {result['scheduled']}",
@@ -1434,7 +1432,6 @@ def review_episode_clips(episode_dir_path: str) -> str:
         Instagram captions. Includes clip slugs needed for description_overrides
         in schedule_episode_clips.
     """
-    import glob as _glob
 
     status_path = os.path.join(episode_dir_path, "pipeline_status.json")
     if not os.path.exists(status_path):

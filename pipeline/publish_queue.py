@@ -74,8 +74,8 @@ def _load() -> list[dict]:
                 )
             except Exception:
                 print(
-                    f"[publish_queue] CRITICAL: queue file is corrupt and backup failed.\n"
-                    f"  Starting with empty queue."
+                    "[publish_queue] CRITICAL: queue file is corrupt and backup failed.\n"
+                    "  Starting with empty queue."
                 )
             return []
     return data if isinstance(data, list) else []
@@ -149,7 +149,7 @@ def enqueue(
     if len(title) > 100:
         title = title[:97] + "..."
         entry_warnings.append("title truncated to 100 chars for YouTube")
-        print(f"[publish_queue] WARNING: title truncated to 100 chars for YouTube")
+        print("[publish_queue] WARNING: title truncated to 100 chars for YouTube")
 
     # ── 3. Strip markdown from all captions ────────────────────────────────────
     description = _strip_md(description)

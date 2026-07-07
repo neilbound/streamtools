@@ -11,8 +11,6 @@ Functions:
 """
 
 import os
-import math
-import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -381,7 +379,6 @@ def upload_youtube(
     # Each attempt: upload -> (on error) try to recover the id from the uploads
     # playlist -> verify the file is intact (real duration) -> delete+retry if not.
     MAX_ATTEMPTS = 3
-    from googleapiclient.http import MediaFileUpload  # re-import safe; used per attempt
     video_id = None
     last_exc = None
 
@@ -629,7 +626,7 @@ def upload_youtube_episode(
                 videoId=video_id,
                 media_body=MediaFileUpload(thumbnail_path, mimetype=mime),
             ).execute()
-            print(f"[YouTube Episode] Thumbnail uploaded.")
+            print("[YouTube Episode] Thumbnail uploaded.")
         except Exception as e:
             print(f"[YouTube Episode] Thumbnail upload failed (non-fatal): {e}")
 
@@ -651,7 +648,7 @@ def upload_youtube_episode(
                 sync=False,
             ).execute()
             captions_uploaded = True
-            print(f"[YouTube Episode] Captions uploaded.")
+            print("[YouTube Episode] Captions uploaded.")
         except Exception as e:
             print(f"[YouTube Episode] Caption upload failed (non-fatal): {e}")
 

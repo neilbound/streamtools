@@ -419,7 +419,6 @@ def stitch_segments(
         (output_path, segment_offsets) where segment_offsets[i] is the
         wall-clock start time (seconds) of video_paths[i] in the output.
     """
-    import json as _json
 
     # Probe each file to get its duration and build cumulative offsets
     offsets: list[float] = []

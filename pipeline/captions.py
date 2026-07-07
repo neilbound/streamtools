@@ -9,7 +9,6 @@ Each word is wrapped: {\\k<hold_time>}{\\kf<highlight_duration>}word
 Color format: &HAABBGGRR (ASS is BGR not RGB, alpha 00 = fully opaque)
 """
 
-import os
 
 
 def _seconds_to_ass_time(seconds: float) -> str:
