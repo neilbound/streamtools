@@ -230,6 +230,24 @@ to cold storage (a Google Drive for Desktop synced folder) to free local disk.
 - Retention is the strongest Shorts signal; engagement and timing are secondary. Treat the
   small sample as directional, not statistical.
 
+## Quote → clip extractor (effect-board bootstrap)
+
+`pipeline/quote_clip.py` + the `find_quote_clips` MCP tool find a spoken line in raw footage
+and cut padded rough candidates for hand-trimming — the first pass that feeds the AI OBS
+effect-board (video-soundboard) buttons.
+
+- `find_quote(transcript, quote)` is **pure logic** (no I/O): exact word-subsequence match
+  first, then a difflib fuzzy fallback (`min_score=0.6`) so small misrememberings still hit.
+  Returns ranked `{start,end,text,score,exact}`. Unit-tested with a fake transcript — keep it
+  network/ffmpeg-free.
+- `get_transcript(video)` caches the Deepgram pass next to the video as `<video>.transcript.json`
+  so repeat searches on the same footage are free; delete it (or `use_cache=False`) to redo.
+- `extract_rough_clips()` **re-encodes** (libx264 veryfast/CRF 20), never stream-copies — a copy
+  snaps to the nearest keyframe and clips the first word. Pads both ends (`pad_lead`/`pad_tail`),
+  clamps to the video duration, writes `manifest.json` alongside the cuts.
+- These are review candidates, NOT final clips — the operator trims, then wires the keepers into
+  the AI OBS studio's effects board.
+
 ## Git
 
 - `master` is the stable base; feature work goes on named branches

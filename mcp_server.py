@@ -94,6 +94,62 @@ def get_video_info(video_path: str) -> str:
 
 
 @mcp.tool()
+def find_quote_clips(
+    video_path: str,
+    quote: str,
+    out_dir: str = "",
+    max_results: int = 5,
+    pad_lead: float = 0.6,
+    pad_tail: float = 0.8,
+    use_cache: bool = True,
+) -> str:
+    """
+    Find a spoken quote in raw footage and cut padded rough clips for trimming.
+
+    First pass for the effect-board / video-soundboard workflow: transcribes the
+    footage (Deepgram, cached next to the video as `.transcript.json` so repeat
+    searches are free), matches the quote by the words spoken (exact first, then
+    a fuzzy fallback for small misrememberings), and writes rough padded cuts +
+    a manifest.json to out_dir. These are candidates to hand-trim before they
+    become final effect clips — not finished clips.
+
+    Args:
+        video_path: Absolute path to the raw video.
+        quote: The line to find, as remembered (casing/punctuation ignored).
+        out_dir: Where to write clips + manifest. Default: `<video>_quote_clips/`.
+        max_results: Max candidate clips to return.
+        pad_lead: Seconds of lead-in before the first word.
+        pad_tail: Seconds of tail after the last word.
+        use_cache: Reuse a cached transcript if present (set False to re-transcribe).
+    """
+    from pipeline.quote_clip import extract_rough_clips
+
+    if not out_dir:
+        out_dir = os.path.splitext(video_path)[0] + "_quote_clips"
+    result = extract_rough_clips(
+        video_path, quote, out_dir,
+        pad_lead=pad_lead, pad_tail=pad_tail,
+        max_results=max_results, use_cache=use_cache,
+    )
+    matches = result["matches"]
+    if not matches:
+        return (
+            f'No match for "{quote}" in {os.path.basename(video_path)}.\n'
+            "Try fewer/looser words, or set use_cache=False if the footage changed."
+        )
+    lines = [f'Found {len(matches)} candidate(s) for "{quote}" → {out_dir}\n']
+    for i, m in enumerate(matches, 1):
+        kind = "exact" if m["exact"] else f"fuzzy {m['score']:.0%}"
+        mm, ss = divmod(int(m["clip_start"]), 60)
+        lines.append(
+            f'{i}. [{kind}] {mm}:{ss:02d} +{m["clip_duration"]:.1f}s  '
+            f'"{m["text"]}"\n   {os.path.basename(m["file"])}'
+        )
+    lines.append("\nReview + trim these, then wire the keepers into the AI OBS effects board.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def compose_portrait(
     video_paths: list[str],
     output_path: str = "",
