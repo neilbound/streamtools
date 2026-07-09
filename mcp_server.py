@@ -1945,6 +1945,34 @@ def refresh_analytics(channel: str = "ilb") -> str:
 
 
 @mcp.tool()
+def llm_cost_report() -> str:
+    """
+    Compare Claude API cost per model across pipeline runs (clip finding +
+    description generation). Reads output/analytics/llm_usage.jsonl, which every
+    Claude call appends to. Use after running an episode on each model (set
+    STREAMTOOLS_CLAUDE_MODEL=claude-opus-4-8 in .env for a comparison run;
+    default is claude-opus-4-7).
+    """
+    from pipeline.llm import DEFAULT_MODEL, cost_report, model
+
+    report = cost_report()
+    if not report:
+        return ("No LLM usage recorded yet — the log populates as find_clips / "
+                "describe run. Current model: " + model())
+    lines = [f"LLM cost by model (current: {model()}, default: {DEFAULT_MODEL})\n"]
+    for m, s in sorted(report.items()):
+        lines.append(
+            f"{m}: {s['calls']} calls | in {s['input_tokens']:,} tok | "
+            f"out {s['output_tokens']:,} tok | ${s['cost_usd']:.4f}"
+        )
+        for call, c in sorted(s["by_call"].items()):
+            lines.append(f"  - {call}: {c['calls']} calls, ${c['cost_usd']:.4f}")
+    lines.append("\nSame per-token price on Opus 4.7/4.8 — differences here are pure "
+                 "token-usage differences. Compare per-call averages on comparable episodes.")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 def performance_report() -> str:
     """
     Content-optimization report from the latest performance snapshot: leaderboards (views,

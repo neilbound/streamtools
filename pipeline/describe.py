@@ -17,6 +17,8 @@ import time
 import anthropic
 from dotenv import load_dotenv
 
+from pipeline import llm
+
 load_dotenv(override=True)
 
 
@@ -171,6 +173,7 @@ def _call_with_retry(client, *, model: str, max_tokens: int, system: str, messag
                 system=system,
                 messages=messages,
             )
+            llm.log_usage("describe", model, message.usage)
             return message.content[0].text.strip()
         except Exception as exc:
             last_error = exc
@@ -233,7 +236,7 @@ Write the complete description package for this episode."""
 
     full_text = _call_with_retry(
         client,
-        model="claude-opus-4-8",
+        model=llm.model(),
         max_tokens=2048,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
@@ -311,7 +314,7 @@ Write the YouTube Short, TikTok, and Instagram descriptions for this clip."""
 
     raw = _call_with_retry(
         client,
-        model="claude-opus-4-8",
+        model=llm.model(),
         max_tokens=1000,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
@@ -326,7 +329,7 @@ Write the YouTube Short, TikTok, and Instagram descriptions for this clip."""
               f"{clip_title!r} — retrying once")
         raw = _call_with_retry(
             client,
-            model="claude-opus-4-8",
+            model=llm.model(),
             max_tokens=1000,
             system=system,
             messages=[{"role": "user", "content": user_prompt + (

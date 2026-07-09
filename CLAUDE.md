@@ -230,6 +230,22 @@ to cold storage (a Google Drive for Desktop synced folder) to free local disk.
 - Retention is the strongest Shorts signal; engagement and timing are secondary. Treat the
   small sample as directional, not statistical.
 
+## Claude model selection + cost tracking
+
+All pipeline Claude calls (clip finding, descriptions) route through `pipeline/llm.py`:
+
+- **Model:** `llm.model()` — default `claude-opus-4-7`, overridden per run via
+  `STREAMTOOLS_CLAUDE_MODEL` in `.env` (e.g. `claude-opus-4-8` for a comparison run).
+  Never hardcode a model ID in pipeline code.
+- **Cost log:** every call appends `{call, model, tokens, cost_usd}` to
+  `output/analytics/llm_usage.jsonl` (`llm.log_usage`, swallow-all — must never break
+  a run). `llm_cost_report` MCP tool aggregates by model for side-by-side comparison.
+- **Opus 4.7 and 4.8 have IDENTICAL per-token pricing** ($5/$25 per MTok) — any cost
+  difference between them is token-usage difference, which is exactly what the log
+  measures. Compare per-call averages on comparable episodes, not raw totals.
+- Opus 4.8 rejects `temperature`/`top_p`/`top_k`/`budget_tokens` with a 400 — don't
+  add sampling params to these calls.
+
 ## Quote → clip extractor (effect-board bootstrap)
 
 `pipeline/quote_clip.py` + the `find_quote_clips` MCP tool find a spoken line in raw footage

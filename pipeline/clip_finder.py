@@ -168,12 +168,15 @@ Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds
 
     for attempt in range(1, max_attempts + 1):
         try:
+            from pipeline import llm
+
             message = client.messages.create(
-                model="claude-opus-4-8",  # originally sonnet -> opus 4.6 -> opus 4.8
+                model=llm.model(),   # default opus 4.7; STREAMTOOLS_CLAUDE_MODEL overrides
                 max_tokens=1024,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
             )
+            llm.log_usage("find_clips", llm.model(), message.usage)
 
             raw = message.content[0].text.strip()
 
