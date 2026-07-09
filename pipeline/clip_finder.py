@@ -84,7 +84,9 @@ def _trim_leading_filler(words: list[dict], start: float, end: float,
         matched = False
         for ph in _FILLER_PHRASES:
             if tuple(norm[i:i + len(ph)]) == ph:
-                i += len(ph); matched = True; break
+                i += len(ph)
+                matched = True
+                break
         if matched:
             continue
         if norm[i] in _FILLER_OPENERS:
@@ -167,7 +169,7 @@ Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds
     for attempt in range(1, max_attempts + 1):
         try:
             message = client.messages.create(
-                model="claude-opus-4-6",  # upgraded from sonnet on test/model-upgrades branch
+                model="claude-opus-4-8",  # originally sonnet -> opus 4.6 -> opus 4.8
                 max_tokens=1024,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],

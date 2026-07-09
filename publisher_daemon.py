@@ -27,10 +27,10 @@ for _stream in (sys.stdout, sys.stderr):
 # Add project root to sys.path so pipeline/ is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402 — must follow sys.path setup
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"), override=True)
 
-from pipeline.publish_queue import (
+from pipeline.publish_queue import (  # noqa: E402 — after load_dotenv
     get_due,
     get_retryable,
     is_fatal_error,
@@ -39,14 +39,14 @@ from pipeline.publish_queue import (
     mark_failed,
     schedule_retry,
 )
-from pipeline.publish import (
+from pipeline.publish import (  # noqa: E402
     reconcile_youtube,
     upload_youtube,
     upload_tiktok,
     upload_instagram,
 )
-from pipeline.analytics import snapshot as _analytics_snapshot
-from pipeline.validate import quick_probe_check
+from pipeline.analytics import snapshot as _analytics_snapshot  # noqa: E402
+from pipeline.validate import quick_probe_check  # noqa: E402
 
 
 # ── Logging ───────────────────────────────────────────────────────────────────

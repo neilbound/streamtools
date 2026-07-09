@@ -69,25 +69,35 @@ def find_quote(transcript: dict, quote: str, *,
         toks.append(t[0] if t else "")
     n, m = len(toks), len(q_tokens)
 
-    # 1) exact contiguous subsequence
+    # 1) exact contiguous subsequence (first-token prefilter skips ~all positions)
+    first = q_tokens[0]
     exact_hits = [
         _span(words, i, i + m - 1, 1.0, True)
         for i in range(0, n - m + 1)
-        if toks[i:i + m] == q_tokens
+        if toks[i] == first and toks[i:i + m] == q_tokens
     ]
     if exact_hits:
         return exact_hits[:max_results]
 
-    # 2) fuzzy fallback — score sliding windows near the quote length
+    # 2) fuzzy fallback — score sliding windows near the quote length.
+    # An hour of speech is ~9k words x 4 window sizes; a full SequenceMatcher
+    # ratio() on every window is tens of seconds. quick_ratio()/real_quick_ratio()
+    # are cheap upper bounds — gate on them and only run the real ratio() on
+    # survivors (difflib's documented fast path). Same results, ~10x faster.
     q_join = " ".join(q_tokens)
     sizes = {s for s in (m - 1, m, m + 1, m + 2) if s >= 1}
+    matcher = SequenceMatcher(None)
+    matcher.set_seq2(q_join)          # difflib caches seq2 — keep the fixed quote there
     scored: list[tuple[float, int, int]] = []
     for size in sizes:
         for i in range(0, max(1, n - size + 1)):
             window = toks[i:i + size]
             if not window:
                 continue
-            score = SequenceMatcher(None, q_join, " ".join(window)).ratio()
+            matcher.set_seq1(" ".join(window))
+            if matcher.real_quick_ratio() < min_score or matcher.quick_ratio() < min_score:
+                continue
+            score = matcher.ratio()
             if score >= min_score:
                 scored.append((score, i, i + len(window) - 1))
     scored.sort(key=lambda t: (-t[0], t[1]))
@@ -119,21 +129,34 @@ def _extract_audio(video_path: str) -> str:
     return wav
 
 
+def _video_fingerprint(video_path: str) -> dict:
+    st = os.stat(video_path)
+    return {"mtime": st.st_mtime, "size": st.st_size}
+
+
 def get_transcript(video_path: str, *, use_cache: bool = True) -> dict:
     """Transcribe a raw video, caching the result next to it as `.transcript.json`.
 
     Searching the same footage for several quotes reuses one (paid) Deepgram
-    pass. Delete the cache file (or pass use_cache=False) to re-transcribe.
+    pass. The cache stores the video's mtime+size and is invalidated when they
+    change — re-recording over the same filename must not serve the old words
+    (timestamps would silently point at the wrong footage). Delete the cache
+    file (or pass use_cache=False) to force a re-transcribe.
     """
     cache = _transcript_cache_path(video_path)
+    fp = _video_fingerprint(video_path)
     if use_cache and os.path.exists(cache):
         with open(cache, encoding="utf-8") as f:
-            return json.load(f)
+            cached = json.load(f)
+        if cached.get("_source") == fp:
+            return cached
+        # stale (video changed since the transcript was made) — fall through
     wav = _extract_audio(video_path)
     try:
         tr = transcribe(wav)
     finally:
         os.unlink(wav)
+    tr["_source"] = fp
     with open(cache, "w", encoding="utf-8") as f:
         json.dump(tr, f, ensure_ascii=False)
     return tr

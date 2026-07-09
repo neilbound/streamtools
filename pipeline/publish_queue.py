@@ -63,7 +63,8 @@ def _load() -> list[dict]:
             data = json.load(f)
         except json.JSONDecodeError:
             # Corrupt file — back it up before starting fresh so entries can be recovered
-            import shutil, time as _t
+            import shutil
+            import time as _t
             backup = _QUEUE_PATH + f".corrupt.{int(_t.time())}"
             try:
                 shutil.copy2(_QUEUE_PATH, backup)
@@ -83,7 +84,7 @@ def _load() -> list[dict]:
 
 def _strip_md(text: str) -> str:
     """Strip markdown bold/italic markers from caption text."""
-    lines = [l for l in text.split("\n") if l.strip() not in ("**", "*", "***")]
+    lines = [ln for ln in text.split("\n") if ln.strip() not in ("**", "*", "***")]
     text = "\n".join(lines)
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
     text = re.sub(r"\*(.+?)\*",     r"\1", text, flags=re.DOTALL)

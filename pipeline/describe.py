@@ -233,7 +233,7 @@ Write the complete description package for this episode."""
 
     full_text = _call_with_retry(
         client,
-        model="claude-opus-4-6",
+        model="claude-opus-4-8",
         max_tokens=2048,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
@@ -311,7 +311,7 @@ Write the YouTube Short, TikTok, and Instagram descriptions for this clip."""
 
     raw = _call_with_retry(
         client,
-        model="claude-opus-4-6",
+        model="claude-opus-4-8",
         max_tokens=1000,
         system=system,
         messages=[{"role": "user", "content": user_prompt}],
@@ -326,7 +326,7 @@ Write the YouTube Short, TikTok, and Instagram descriptions for this clip."""
               f"{clip_title!r} — retrying once")
         raw = _call_with_retry(
             client,
-            model="claude-opus-4-6",
+            model="claude-opus-4-8",
             max_tokens=1000,
             system=system,
             messages=[{"role": "user", "content": user_prompt + (
@@ -367,7 +367,7 @@ def _strip_markdown(text: str) -> str:
     import re
     # Remove lines that are only ** or * (common Claude artifact)
     lines = text.split("\n")
-    lines = [l for l in lines if l.strip() not in ("**", "*", "***")]
+    lines = [ln for ln in lines if ln.strip() not in ("**", "*", "***")]
     text = "\n".join(lines)
     # Strip **text** bold markers → text
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)

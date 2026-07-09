@@ -72,3 +72,41 @@ def test_norm_tokens_and_slug():
     assert _norm_tokens("Don't— you DARE!") == ["don't", "you", "dare"]
     assert _slug("The Soup Was Disgusting!") == "the-soup-was-disgusting"
     assert _slug("!!!") == "clip"
+
+
+def test_transcript_cache_invalidated_when_video_changes(tmp_path, monkeypatch):
+    """Re-recording over the same filename must not serve the old transcript —
+    the cache is keyed to the video's mtime+size fingerprint."""
+    import os
+
+    from pipeline import quote_clip
+
+    video = tmp_path / "raw.mp4"
+    video.write_bytes(b"take one")
+
+    calls = []
+
+    def fake_extract(path):
+        wav = tmp_path / "tmp.wav"
+        wav.write_bytes(b"x")
+        return str(wav)
+
+    def fake_transcribe(wav):
+        calls.append(1)
+        return {"text": f"take {len(calls)}", "words": []}
+
+    monkeypatch.setattr(quote_clip, "_extract_audio", fake_extract)
+    monkeypatch.setattr(quote_clip, "transcribe", fake_transcribe)
+
+    t1 = quote_clip.get_transcript(str(video))
+    assert t1["text"] == "take 1" and len(calls) == 1
+
+    # same video -> cache hit, no new transcription
+    t2 = quote_clip.get_transcript(str(video))
+    assert t2["text"] == "take 1" and len(calls) == 1
+
+    # video re-recorded (content + mtime change) -> cache is stale -> re-transcribe
+    video.write_bytes(b"take two, different bytes")
+    os.utime(video, (os.path.getmtime(video) + 10,) * 2)
+    t3 = quote_clip.get_transcript(str(video))
+    assert t3["text"] == "take 2" and len(calls) == 2

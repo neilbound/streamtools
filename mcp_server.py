@@ -33,8 +33,8 @@ for _stream in (sys.stdout, sys.stderr):
     if _stream is not None and hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from dotenv import load_dotenv  # noqa: E402 — must follow the UTF-8 stdio guard above
+from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 # Ensure pipeline/ is importable
 sys.path.insert(0, os.path.dirname(__file__))

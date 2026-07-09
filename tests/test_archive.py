@@ -28,7 +28,8 @@ def test_deliverables_exclude_intermediates(tmp_path):
 
 def test_archive_copies_verifies_deletes(tmp_path):
     ep = _make_episode(tmp_path)
-    root = tmp_path / "drive"; root.mkdir()
+    root = tmp_path / "drive"
+    root.mkdir()
     rep = arch.archive_episode(str(ep), archive_root=str(root))
     dest = root / "show_ep_2026-01-01"
     # deliverables landed in archive
@@ -47,7 +48,8 @@ def test_archive_copies_verifies_deletes(tmp_path):
 
 def test_dry_run_moves_nothing(tmp_path):
     ep = _make_episode(tmp_path)
-    root = tmp_path / "drive"; root.mkdir()
+    root = tmp_path / "drive"
+    root.mkdir()
     rep = arch.archive_episode(str(ep), archive_root=str(root), dry_run=True)
     assert (ep / "clips" / "a_social.mp4").exists()
     assert not (root / "show_ep_2026-01-01").exists()

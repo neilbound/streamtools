@@ -17,8 +17,8 @@ _FFMPEG_BIN = r"C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmp
 if _FFMPEG_BIN not in os.environ.get("PATH", ""):
     os.environ["PATH"] = _FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
 
-import torch
-from df.enhance import enhance, init_df, load_audio, save_audio
+import torch  # noqa: E402 — must follow the FFmpeg PATH injection above
+from df.enhance import enhance, init_df, load_audio, save_audio  # noqa: E402
 
 _model = None
 _df_state = None
