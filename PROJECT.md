@@ -469,6 +469,11 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
       punchy. So: hardened clip-finder (concrete-hook prompt + `_trim_leading_filler`), and an on-screen
       bold hook card on the first 3.5s (`render_hook_card` + `export_clip(hook_text=)`, clip-finder emits
       a `hook`, `pipeline.hook_overlay` flag). Rolled to all remaining shorts; under measurement.
+- [x] ~~**Quote → clip extractor**~~ — built (`pipeline/quote_clip.py` + `find_quote_clips` MCP tool).
+      Search raw footage by the words spoken (exact word-subsequence match, difflib fuzzy fallback),
+      cut padded rough candidates + a manifest for hand-trimming. Deepgram transcript cached next to
+      the video. First pass that feeds the **AI OBS effect board** (video-soundboard Stream Deck
+      buttons) — the trimmed keepers become effect clips. See [AI OBS](../AI OBS/SPEC.md).
 - [ ] **Instagram analytics** — Reel insights (reach, plays, saves, shares) via the Graph API for
       cross-platform comparison (deferred; YouTube-only for now).
 - [ ] **Daemon supervision** — Task Scheduler works but is fragile (was found *Disabled*, causing a
@@ -492,6 +497,9 @@ C:\Users\ntmas\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_...\ffmpeg-8.
 
 Reverse-chronological log of major milestones. Operational gotchas live in CLAUDE.md.
 
+- **2026-07-09** — **Quote → clip extractor** (`quote_clip.py` + `find_quote_clips`): find a
+  spoken line in raw footage (exact + fuzzy), cut padded rough candidates for hand-trimming.
+  Bootstraps the AI OBS video-soundboard/effect-board workflow.
 - **2026-06-22** — Rolled the hardened finder + hook overlay to all remaining shorts
   (John / Jorge / Logan = the "new-approach" cohort, posting Jun 19–27) vs the older baseline.
   Performance finding: Chris & Leah retain ~44% but get few views → a *distribution* problem,
