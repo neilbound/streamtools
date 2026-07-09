@@ -171,7 +171,7 @@ Return ONLY a JSON array (no markdown, no explanation). Times must be in seconds
             from pipeline import llm
 
             message = client.messages.create(
-                model=llm.model(),   # default opus 4.7; STREAMTOOLS_CLAUDE_MODEL overrides
+                model=llm.model(),   # default opus 4.8; STREAMTOOLS_CLAUDE_MODEL overrides
                 max_tokens=1024,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],

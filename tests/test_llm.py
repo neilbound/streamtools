@@ -6,11 +6,11 @@ from pipeline import llm
 
 def test_default_model_and_env_override(monkeypatch):
     monkeypatch.delenv("STREAMTOOLS_CLAUDE_MODEL", raising=False)
-    assert llm.model() == "claude-opus-4-7"
-    monkeypatch.setenv("STREAMTOOLS_CLAUDE_MODEL", "claude-opus-4-8")
     assert llm.model() == "claude-opus-4-8"
-    monkeypatch.setenv("STREAMTOOLS_CLAUDE_MODEL", "")   # empty -> default
+    monkeypatch.setenv("STREAMTOOLS_CLAUDE_MODEL", "claude-opus-4-7")
     assert llm.model() == "claude-opus-4-7"
+    monkeypatch.setenv("STREAMTOOLS_CLAUDE_MODEL", "")   # empty -> default
+    assert llm.model() == "claude-opus-4-8"
 
 
 def test_call_cost_math():

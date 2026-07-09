@@ -234,8 +234,8 @@ to cold storage (a Google Drive for Desktop synced folder) to free local disk.
 
 All pipeline Claude calls (clip finding, descriptions) route through `pipeline/llm.py`:
 
-- **Model:** `llm.model()` — default `claude-opus-4-7`, overridden per run via
-  `STREAMTOOLS_CLAUDE_MODEL` in `.env` (e.g. `claude-opus-4-8` for a comparison run).
+- **Model:** `llm.model()` — default `claude-opus-4-8`, overridden per run via
+  `STREAMTOOLS_CLAUDE_MODEL` in `.env` (e.g. `claude-opus-4-7` to compare the other way).
   Never hardcode a model ID in pipeline code.
 - **Cost log:** every call appends `{call, model, tokens, cost_usd}` to
   `output/analytics/llm_usage.jsonl` (`llm.log_usage`, swallow-all — must never break

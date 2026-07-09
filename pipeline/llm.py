@@ -8,13 +8,13 @@ NOTE: Opus 4.7 and 4.8 share the same sticker price ($5/$25 per MTok) — a
 exactly what this log measures: run an episode on each model and compare.
 
 Switch models per run via `STREAMTOOLS_CLAUDE_MODEL` (e.g. in .env):
-    STREAMTOOLS_CLAUDE_MODEL=claude-opus-4-8
+    STREAMTOOLS_CLAUDE_MODEL=claude-opus-4-7
 """
 import json
 import os
 import time
 
-DEFAULT_MODEL = "claude-opus-4-7"
+DEFAULT_MODEL = "claude-opus-4-8"
 
 # $/MTok (input, output). Keep in sync with platform.claude.com/docs pricing.
 PRICES = {
